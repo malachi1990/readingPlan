@@ -7,37 +7,34 @@ import org.bible.reading.dto.ReadingPlan
 import java.time.DayOfWeek
 import java.time.LocalDate
 
-class SimpleSequentialStrategy : Strategy {
+class SimpleSequentialStrategy(
+    val chaptersPerDay: Int = 3,
+    val chaptersOnSunday: Int = 5,
+    val chaptersPerDayOfWeek: Map<DayOfWeek, Int>? = null,
+    val books: List<Bible> = Bible.getBooksInOrder()
+) : Strategy {
 
-    val chaptersPerDay = 3
-    val chaptersOnSunday = 5
-
-    override fun generateReadingPlan(startDate : LocalDate) : ReadingPlan {
-        val books = Bible.getBooksInOrder()
+    override fun generateReadingPlan(startDate: LocalDate): ReadingPlan {
         val readings = generateReadings(books)
         var iterator = 0
         var currentDate = startDate
         val dailyReadings = mutableListOf<DailyReading>()
-        do {
-            var chaptersToRead = chaptersPerDay
-            var currentReading = mutableListOf<Reading>()
-            if(currentDate.dayOfWeek.equals(DayOfWeek.SUNDAY)){
-                chaptersToRead = chaptersOnSunday
-            }
 
-            for (i in 1..chaptersToRead){
-                currentReading.add(readings.get(iterator))
+        while (iterator < readings.size) {
+            val chaptersToRead = chaptersPerDayOfWeek?.get(currentDate.dayOfWeek)
+                ?: if (currentDate.dayOfWeek == DayOfWeek.SUNDAY) chaptersOnSunday else chaptersPerDay
+
+            val currentReading = mutableListOf<Reading>()
+            for (i in 1..chaptersToRead) {
+                currentReading.add(readings[iterator])
                 iterator++
-                if(iterator >= readings.size){
+                if (iterator >= readings.size) {
                     break
                 }
             }
             dailyReadings.add(DailyReading(currentDate, currentReading))
             currentDate = currentDate.plusDays(1)
-        } while (iterator < readings.size)
+        }
         return ReadingPlan(dailyReadings)
     }
-
-
-
 }

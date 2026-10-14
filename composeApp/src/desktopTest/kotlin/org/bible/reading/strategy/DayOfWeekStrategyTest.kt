@@ -8,9 +8,9 @@ class DayOfWeekStrategyTest {
 
     @Test
     fun testStrategy(){
-        val result = DayOfWeekStrategy().generateReadingPlan(LocalDate.of(2025, 1, 1))
+        val result = DayOfWeekStrategy().generateReadingPlan(LocalDate.of(2026, 1, 1))
         println(result)
-        assertEquals("1 Chronicles", result.readings[0].reading[0].book)
+        assertEquals("Isaiah", result.readings[0].reading[0].book)
         assertEquals(1, result.readings[0].reading[0].chapterNumber)
 
     }
