@@ -81,17 +81,17 @@ enum class Bible( val bookName : String, val chapters : Int, val collection : Bo
     JUDE("Jude", 1, BookCollection.Epistles,65),
     REVELATION("Revelation", 22, BookCollection.Epistles,66);
 
-companion object {
-    fun getTotalChapters() : Int {
-        return 1189
+    companion object {
+        fun getTotalChapters() : Int {
+            return 1189
+        }
+
+        fun getBooksInOrder() : List<Bible> {
+            return enumEntries<Bible>().sortedBy { b -> b.order }
+        }
+
+        fun fromBookName(name: String): Bible? {
+            return enumEntries<Bible>().firstOrNull { it.bookName.equals(name, ignoreCase = true) }
+        }
     }
-
-    fun getBooksInOrder() : List<Bible> {
-        return enumEntries<Bible>().sortedBy { b -> b.order }
-    }
-
-}
-
-
-
 }

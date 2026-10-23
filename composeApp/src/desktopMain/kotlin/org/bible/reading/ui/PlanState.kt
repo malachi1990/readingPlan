@@ -6,8 +6,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import org.bible.reading.dto.Bible
 import org.bible.reading.dto.BookCollection
+import org.bible.reading.dto.DailyReading
 import org.bible.reading.dto.ExportFormat
 import org.bible.reading.dto.ReadingPlan
+import org.bible.reading.jsword.SwordManager
 import org.bible.reading.strategy.ContinuationStrategy
 import org.bible.reading.strategy.ContinuationStrategyType
 import org.bible.reading.strategy.DayOfWeekStrategy
@@ -27,6 +29,13 @@ enum class PlanStrategyChoice(val displayName: String, val description: String) 
 }
 
 class PlanState {
+    // JSword Manager instance
+    val swordManager = SwordManager()
+
+    // Navigation & View states
+    var viewingDailyReading by mutableStateOf<DailyReading?>(null)
+    var showDownloadDialog by mutableStateOf(false)
+
     // Strategy selection
     var selectedStrategyChoice by mutableStateOf(PlanStrategyChoice.DAY_OF_WEEK)
 
@@ -54,6 +63,16 @@ class PlanState {
     // Continuation strategy when a day's assigned readings are finished
     var continuationStrategyType by mutableStateOf(ContinuationStrategyType.LOOKBACK)
 
+    // Custom Completion by Day Order mappings (e.g. Sunday -> Wednesday, Friday -> Monday)
+    val customDayOrderMapping = mutableStateMapOf<DayOfWeek, DayOfWeek>().apply {
+        putAll(ContinuationStrategy.defaultDayOrderMapping())
+    }
+
+    // Custom Completion by Book Collection mappings (e.g. Wisdom -> Gospels_Acts)
+    val customCollectionOrderMapping = mutableStateMapOf<BookCollection, BookCollection>().apply {
+        putAll(ContinuationStrategy.defaultCollectionOrderMapping())
+    }
+
     // Start date
     var startDate by mutableStateOf(LocalDate.of(2026, 1, 1))
 
@@ -73,6 +92,32 @@ class PlanState {
     var saveStatusMessage by mutableStateOf<String?>(null)
     var isSaveSuccess by mutableStateOf(true)
     var lastSavedFile by mutableStateOf<File?>(null)
+
+    fun navigateDailyReading(offset: Int) {
+        val plan = readingPlan ?: return
+        val current = viewingDailyReading ?: return
+        val currentIndex = plan.readings.indexOf(current)
+        if (currentIndex != -1) {
+            val newIndex = currentIndex + offset
+            if (newIndex in plan.readings.indices) {
+                viewingDailyReading = plan.readings[newIndex]
+            }
+        }
+    }
+
+    fun hasPreviousDailyReading(): Boolean {
+        val plan = readingPlan ?: return false
+        val current = viewingDailyReading ?: return false
+        val currentIndex = plan.readings.indexOf(current)
+        return currentIndex > 0
+    }
+
+    fun hasNextDailyReading(): Boolean {
+        val plan = readingPlan ?: return false
+        val current = viewingDailyReading ?: return false
+        val currentIndex = plan.readings.indexOf(current)
+        return currentIndex != -1 && currentIndex < plan.readings.lastIndex
+    }
 
     fun addBookToDay(day: DayOfWeek, book: Bible) {
         val list = booksByDay.getOrPut(day) { mutableListOf() }
@@ -118,7 +163,23 @@ class PlanState {
         return booksByDay[day]?.sumOf { it.chapters } ?: 0
     }
 
+    fun buildContinuationStrategy(): ContinuationStrategy {
+        return when (continuationStrategyType) {
+            ContinuationStrategyType.LOOKBACK -> ContinuationStrategy.LOOKBACK
+            ContinuationStrategyType.LOOKFORWARD -> ContinuationStrategy.LOOKFORWARD
+            ContinuationStrategyType.FIRST_AVAILABLE -> ContinuationStrategy.FIRST_AVAILABLE
+            ContinuationStrategyType.SKIP -> ContinuationStrategy.SKIP
+            ContinuationStrategyType.CUSTOM_DAY_ORDER -> ContinuationStrategy.byDayOrder(customDayOrderMapping.toMap())
+            ContinuationStrategyType.CUSTOM_BOOK_COLLECTION -> ContinuationStrategy.byBookCollection(
+                booksByDay.mapValues { it.value.toList() },
+                customCollectionOrderMapping.toMap()
+            )
+            ContinuationStrategyType.CUSTOM -> ContinuationStrategy.byDayOrder(customDayOrderMapping.toMap())
+        }
+    }
+
     fun buildCurrentStrategy(): Strategy {
+        val contStrategy = buildContinuationStrategy()
         return when (selectedStrategyChoice) {
             PlanStrategyChoice.DAY_OF_WEEK -> {
                 val dayMap = if (useCustomPerDayChapters) perDayChapters.toMap() else null
@@ -127,7 +188,7 @@ class PlanState {
                     chaptersOnSunday = chaptersOnSunday,
                     chaptersPerDayOfWeek = dayMap,
                     booksByDay = booksByDay.mapValues { it.value.toList() },
-                    continuationStrategy = ContinuationStrategy.fromType(continuationStrategyType)
+                    continuationStrategy = contStrategy
                 )
             }
             PlanStrategyChoice.SIMPLE_SEQUENTIAL -> {
@@ -147,7 +208,7 @@ class PlanState {
                         chaptersPerDay = chaptersPerDay,
                         chaptersOnSunday = chaptersOnSunday,
                         booksByDay = booksByDay.mapValues { it.value.toList() },
-                        continuationStrategy = ContinuationStrategy.fromType(continuationStrategyType)
+                        continuationStrategy = contStrategy
                     )
             }
         }

@@ -29,6 +29,12 @@ kotlin {
         desktopMain.dependencies {
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutinesSwing)
+            implementation(libs.crosswire.jsword)
+            implementation(libs.jdom2)
+            implementation(libs.commons.net)
+            implementation(libs.commons.codec)
+            implementation(libs.commons.compress)
+            implementation(libs.slf4j.simple)
         }
     }
 }
@@ -45,4 +51,3 @@ compose.desktop {
         }
     }
 }
-

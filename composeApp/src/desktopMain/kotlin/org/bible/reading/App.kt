@@ -23,6 +23,8 @@ import org.bible.reading.dto.BookCollection
 import org.bible.reading.dto.ExportFormat
 import org.bible.reading.strategy.ContinuationStrategyType
 import org.bible.reading.strategy.StrategyRegistry
+import org.bible.reading.ui.DailyReadingView
+import org.bible.reading.ui.DownloadBibleDialog
 import org.bible.reading.ui.PlanState
 import org.bible.reading.ui.PlanStrategyChoice
 import java.awt.Desktop
@@ -40,101 +42,151 @@ fun App(state: PlanState = remember { PlanState() }) {
             modifier = Modifier.fillMaxSize(),
             color = MaterialTheme.colorScheme.background
         ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                // Header Bar
-                Surface(
-                    tonalElevation = 2.dp,
-                    shadowElevation = 2.dp,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+            val activeReading = state.viewingDailyReading
+            if (activeReading != null) {
+                // Requirement 4: Open view at given day's reading
+                DailyReadingView(
+                    dailyReading = activeReading,
+                    manager = state.swordManager,
+                    onBack = { state.viewingDailyReading = null },
+                    onOpenDownload = { state.showDownloadDialog = true },
+                    onPreviousDay = if (state.hasPreviousDailyReading()) { { state.navigateDailyReading(-1) } } else null,
+                    onNextDay = if (state.hasNextDailyReading()) { { state.navigateDailyReading(1) } } else null
+                )
+            } else {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    // Header Bar
+                    Surface(
+                        tonalElevation = 2.dp,
+                        shadowElevation = 2.dp,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 24.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column {
+                                Text(
+                                    text = "Bible Reading Plan Generator",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Customize book schedules, daily chapter goals, and completion strategies",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Active Bible indicator if available
+                                state.swordManager.selectedBible?.let { activeBible ->
+                                    Surface(
+                                        shape = RoundedCornerShape(16.dp),
+                                        color = MaterialTheme.colorScheme.secondaryContainer,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(16.dp))
+                                            .clickable { state.showDownloadDialog = true }
+                                    ) {
+                                        Text(
+                                            text = "📖 ${activeBible.initials}",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                }
+
+                                // Requirement 3: Button to download Bible on the main page
+                                OutlinedButton(
+                                    onClick = { state.showDownloadDialog = true }
+                                ) {
+                                    Text("📚 Download Bible", fontWeight = FontWeight.SemiBold)
+                                }
+
+                                Button(
+                                    onClick = { state.generatePlan() },
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                                ) {
+                                    Text("Generate Reading Plan", fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
+                    }
+
+                    // Main Content: Split View (Settings on Left, Generated Plan on Right)
                     Row(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 24.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                            .fillMaxSize()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        Column {
-                            Text(
-                                text = "Bible Reading Plan Generator",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Customize book schedules, daily chapter goals, and completion strategies",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(
-                                onClick = { state.generatePlan() },
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                            ) {
-                                Text("Generate Reading Plan", fontWeight = FontWeight.SemiBold)
-                            }
-                        }
-                    }
-                }
-
-                // Main Content: Split View (Settings on Left, Generated Plan on Right)
-                Row(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    // Left Column: Configuration Settings
-                    Card(
-                        modifier = Modifier
-                            .weight(1.05f)
-                            .fillMaxHeight(),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                    ) {
-                        Column(
+                        // Left Column: Configuration Settings
+                        Card(
                             modifier = Modifier
-                                .fillMaxSize()
-                                .verticalScroll(rememberScrollState())
-                                .padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                                .weight(1.05f)
+                                .fillMaxHeight(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
                         ) {
-                            // Section 1: Strategy Selection
-                            StrategySelectionSection(state)
-
-                            HorizontalDivider()
-
-                            // Section 2: Chapters Per Day Configuration
-                            ChaptersPerDaySection(state)
-
-                            // Section 3: Day-of-Week Specific Book & Continuation Settings
-                            if (state.selectedStrategyChoice == PlanStrategyChoice.DAY_OF_WEEK ||
-                                state.selectedStrategyChoice == PlanStrategyChoice.CUSTOM_STRATEGY
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(16.dp)
                             ) {
-                                HorizontalDivider()
-                                ContinuationStrategySection(state)
+                                // Section 1: Strategy Selection
+                                StrategySelectionSection(state)
 
                                 HorizontalDivider()
-                                BooksByDaySection(state)
+
+                                // Section 2: Chapters Per Day Configuration
+                                ChaptersPerDaySection(state)
+
+                                // Section 3: Day-of-Week Specific Book & Continuation Settings
+                                if (state.selectedStrategyChoice == PlanStrategyChoice.DAY_OF_WEEK ||
+                                    state.selectedStrategyChoice == PlanStrategyChoice.CUSTOM_STRATEGY
+                                ) {
+                                    HorizontalDivider()
+                                    ContinuationStrategySection(state)
+
+                                    HorizontalDivider()
+                                    BooksByDaySection(state)
+                                }
+
+                                HorizontalDivider()
+
+                                // Section 4: Start Date
+                                StartDateSection(state)
                             }
+                        }
 
-                            HorizontalDivider()
-
-                            // Section 4: Start Date
-                            StartDateSection(state)
+                        // Right Column: Generated Plan View & Export
+                        Card(
+                            modifier = Modifier
+                                .weight(1.15f)
+                                .fillMaxHeight(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                        ) {
+                            PlanResultsSection(state)
                         }
                     }
-
-                    // Right Column: Generated Plan View & Export
-                    Card(
-                        modifier = Modifier
-                            .weight(1.15f)
-                            .fillMaxHeight(),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
-                    ) {
-                        PlanResultsSection(state)
-                    }
                 }
+            }
+
+            // Requirement 3: Download dialog view
+            if (state.showDownloadDialog) {
+                DownloadBibleDialog(
+                    manager = state.swordManager,
+                    onDismissRequest = { state.showDownloadDialog = false }
+                )
             }
         }
     }
@@ -412,6 +464,144 @@ private fun ContinuationStrategySection(state: PlanState) {
                                 menuExpanded = false
                             }
                         )
+                    }
+                }
+            }
+        }
+
+        // Custom Completion Option 1: By Day Order
+        if (state.continuationStrategyType == ContinuationStrategyType.CUSTOM_DAY_ORDER ||
+            state.continuationStrategyType == ContinuationStrategyType.CUSTOM
+        ) {
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Custom Completion: By Day Order",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Configure fallback day order (e.g. if Sunday is complete, select next Wednesday reading; if Friday is done, select next Monday reading):",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    DayOfWeek.entries.forEach { fromDay ->
+                        val targetDay = state.customDayOrderMapping[fromDay] ?: DayOfWeek.MONDAY
+                        var dayMenuExpanded by remember { mutableStateOf(false) }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "If ${fromDay.getDisplayName(TextStyle.FULL, Locale.getDefault())} is complete →",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+
+                            Box {
+                                OutlinedButton(
+                                    onClick = { dayMenuExpanded = true },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
+                                    Text("Next: ${targetDay.getDisplayName(TextStyle.SHORT, Locale.getDefault())} ▼", fontSize = 12.sp)
+                                }
+
+                                DropdownMenu(
+                                    expanded = dayMenuExpanded,
+                                    onDismissRequest = { dayMenuExpanded = false }
+                                ) {
+                                    DayOfWeek.entries.forEach { optionDay ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    optionDay.getDisplayName(TextStyle.FULL, Locale.getDefault()),
+                                                    fontWeight = if (optionDay == targetDay) FontWeight.Bold else FontWeight.Normal
+                                                )
+                                            },
+                                            onClick = {
+                                                state.customDayOrderMapping[fromDay] = optionDay
+                                                dayMenuExpanded = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Custom Completion Option 2: By Book Collection
+        if (state.continuationStrategyType == ContinuationStrategyType.CUSTOM_BOOK_COLLECTION) {
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Custom Completion: By Book Collection",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Configure fallback collection order (e.g. if Wisdom literature is done, select next reading from Gospels & Acts):",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    BookCollection.entries.forEach { fromColl ->
+                        val targetColl = state.customCollectionOrderMapping[fromColl] ?: BookCollection.Gospels_Acts
+                        var collMenuExpanded by remember { mutableStateOf(false) }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "If ${fromColl.name.replace("_", " ")} is done →",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+
+                            Box {
+                                OutlinedButton(
+                                    onClick = { collMenuExpanded = true },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
+                                    Text("Next: ${targetColl.name.replace("_", " ")} ▼", fontSize = 12.sp)
+                                }
+
+                                DropdownMenu(
+                                    expanded = collMenuExpanded,
+                                    onDismissRequest = { collMenuExpanded = false }
+                                ) {
+                                    BookCollection.entries.forEach { optionColl ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    optionColl.name.replace("_", " "),
+                                                    fontWeight = if (optionColl == targetColl) FontWeight.Bold else FontWeight.Normal
+                                                )
+                                            },
+                                            onClick = {
+                                                state.customCollectionOrderMapping[fromColl] = optionColl
+                                                collMenuExpanded = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -698,11 +888,20 @@ private fun PlanResultsSection(state: PlanState) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "Generated Reading Plan",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold
-            )
+            Column {
+                Text(
+                    text = "Generated Reading Plan",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                if (plan != null) {
+                    Text(
+                        text = "Click on any day's reading to open Scripture reading view",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
             if (plan != null) {
                 Text(
                     text = "${plan.readings.size} Total Days",
@@ -798,14 +997,19 @@ private fun PlanResultsSection(state: PlanState) {
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 itemsIndexed(filteredReadings) { _, daily ->
+                    // Requirement 4: Clickable reading card opening view at given day's reading
                     ElevatedCard(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { state.viewingDailyReading = daily },
                         colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
                                     text = daily.date.format(dateFormatter),
@@ -813,11 +1017,23 @@ private fun PlanResultsSection(state: PlanState) {
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.primary
                                 )
-                                Text(
-                                    text = "${daily.reading.size} chapters",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = "${daily.reading.size} chapters",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    FilledTonalButton(
+                                        onClick = { state.viewingDailyReading = daily },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(28.dp)
+                                    ) {
+                                        Text("Read 📖", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                }
                             }
                             Spacer(Modifier.height(4.dp))
                             val groupedText = daily.reading.groupBy { it.book }
