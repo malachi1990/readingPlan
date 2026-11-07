@@ -1,8 +1,5 @@
 package org.bible.reading.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -11,7 +8,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -19,6 +15,8 @@ import org.bible.reading.dto.DailyReading
 import org.bible.reading.dto.Reading
 import org.bible.reading.jsword.ChapterPassage
 import org.bible.reading.jsword.SwordManager
+import org.bible.reading.audio.service.AudioBibleService
+import org.bible.reading.audio.ui.AudioPlayerBar
 import java.time.format.DateTimeFormatter
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -26,8 +24,10 @@ import java.time.format.DateTimeFormatter
 fun DailyReadingView(
     dailyReading: DailyReading,
     manager: SwordManager,
+    audioService: AudioBibleService? = null,
     onBack: () -> Unit,
     onOpenDownload: () -> Unit,
+    onOpenAudioSettings: (() -> Unit)? = null,
     onPreviousDay: (() -> Unit)? = null,
     onNextDay: (() -> Unit)? = null
 ) {
@@ -183,25 +183,59 @@ fun DailyReadingView(
                 tonalElevation = 1.dp,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                FlowRow(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 20.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    FilterChip(
-                        selected = selectedReadingIndex == -1,
-                        onClick = { selectedReadingIndex = -1 },
-                        label = { Text("All Chapters (${dailyReading.reading.size})") }
-                    )
-
-                    dailyReading.reading.forEachIndexed { index, reading ->
+                    FlowRow(
+                        modifier = Modifier.weight(1f),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         FilterChip(
-                            selected = selectedReadingIndex == index,
-                            onClick = { selectedReadingIndex = index },
-                            label = { Text("${reading.book} ${reading.chapterNumber}") }
+                            selected = selectedReadingIndex == -1,
+                            onClick = { selectedReadingIndex = -1 },
+                            label = { Text("All Chapters (${dailyReading.reading.size})") }
                         )
+
+                        dailyReading.reading.forEachIndexed { index, reading ->
+                            FilterChip(
+                                selected = selectedReadingIndex == index,
+                                onClick = { selectedReadingIndex = index },
+                                label = { Text("${reading.book} ${reading.chapterNumber}") }
+                            )
+                        }
+                    }
+
+                    if (audioService != null) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (audioService.hasAudioForDailyReading(dailyReading)) {
+                                Button(
+                                    onClick = {
+                                        if (selectedReadingIndex in dailyReading.reading.indices) {
+                                            audioService.playReading(dailyReading.reading[selectedReadingIndex])
+                                        } else {
+                                            audioService.playDailyReading(dailyReading)
+                                        }
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Text("🎧 Listen to Day", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+
+                            OutlinedButton(
+                                onClick = { onOpenAudioSettings?.invoke() },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.height(34.dp)
+                            ) {
+                                Text("🎧 Audio Settings", fontSize = 12.sp)
+                            }
+                        }
                     }
                 }
             }
@@ -274,17 +308,35 @@ fun DailyReadingView(
                                         fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.primary
                                     )
-                                    manager.selectedBible?.let { bible ->
-                                        Surface(
-                                            shape = RoundedCornerShape(12.dp),
-                                            color = MaterialTheme.colorScheme.primaryContainer
-                                        ) {
-                                            Text(
-                                                text = "${bible.name} (${bible.initials})",
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                                            )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        if (audioService != null) {
+                                            val currentChapterReading = Reading(passage.bookName, passage.chapterNumber)
+                                            if (audioService.hasAudioForReading(currentChapterReading)) {
+                                                FilledTonalButton(
+                                                    onClick = { audioService.playReading(currentChapterReading) },
+                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                    modifier = Modifier.height(30.dp)
+                                                ) {
+                                                    Text("🎧 Listen", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                                }
+                                            }
+                                        }
+
+                                        manager.selectedBible?.let { bible ->
+                                            Surface(
+                                                shape = RoundedCornerShape(12.dp),
+                                                color = MaterialTheme.colorScheme.primaryContainer
+                                            ) {
+                                                Text(
+                                                    text = "${bible.name} (${bible.initials})",
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -363,6 +415,10 @@ fun DailyReadingView(
                         }
                     }
                 }
+            }
+
+            if (audioService?.player?.currentTrack != null) {
+                AudioPlayerBar(player = audioService.player)
             }
         }
     }

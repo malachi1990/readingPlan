@@ -10,6 +10,7 @@ import org.bible.reading.dto.DailyReading
 import org.bible.reading.dto.ExportFormat
 import org.bible.reading.dto.ReadingPlan
 import org.bible.reading.jsword.SwordManager
+import org.bible.reading.audio.service.AudioBibleService
 import org.bible.reading.strategy.ContinuationStrategy
 import org.bible.reading.strategy.ContinuationStrategyType
 import org.bible.reading.strategy.DayOfWeekStrategy
@@ -21,9 +22,14 @@ import java.io.File
 import java.time.DayOfWeek
 import java.time.LocalDate
 
+enum class MainAppTab(val title: String) {
+    READING_PLAN("Bible Reading plan"),
+    FURTHER_STUDY("Further Study")
+}
+
 enum class PlanStrategyChoice(val displayName: String, val description: String) {
     DAY_OF_WEEK("Day of Week Plan", "Assign books to specific days of the week with configurable continuation rules"),
-    SIMPLE_SEQUENTIAL("Simple Sequential", "Read straight through books from start to finish"),
+    SIMPLE_SEQUENTIAL("Sequential", "Read straight through books from start to finish"),
     WEEKDAY_ONLY("Weekday Only", "Read on weekdays (Monday-Friday) and rest on weekends"),
     CUSTOM_STRATEGY("Custom Pluggable Strategy", "Use a registered or user-defined custom strategy")
 }
@@ -32,9 +38,16 @@ class PlanState {
     // JSword Manager instance
     val swordManager = SwordManager()
 
+    // Navigation Tab
+    var currentTab by mutableStateOf(MainAppTab.READING_PLAN)
+
     // Navigation & View states
     var viewingDailyReading by mutableStateOf<DailyReading?>(null)
     var showDownloadDialog by mutableStateOf(false)
+
+    // Audio Bible Service & settings dialog
+    val audioService: AudioBibleService = AudioBibleService(swordManager.appDir)
+    var showAudioSettingsDialog by mutableStateOf(false)
 
     // Strategy selection
     var selectedStrategyChoice by mutableStateOf(PlanStrategyChoice.DAY_OF_WEEK)

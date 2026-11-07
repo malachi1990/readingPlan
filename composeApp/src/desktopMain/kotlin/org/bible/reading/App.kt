@@ -25,6 +25,13 @@ import org.bible.reading.strategy.ContinuationStrategyType
 import org.bible.reading.strategy.StrategyRegistry
 import org.bible.reading.ui.DailyReadingView
 import org.bible.reading.ui.DownloadBibleDialog
+import org.bible.reading.ui.FurtherStudyView
+import org.bible.reading.audio.ui.AudioPlayerBar
+import org.bible.reading.audio.ui.AudioSettingsDialog
+import org.bible.reading.ui.ImportBookDialog
+import org.bible.reading.ui.openBookFileChooser
+import java.io.File
+import org.bible.reading.ui.MainAppTab
 import org.bible.reading.ui.PlanState
 import org.bible.reading.ui.PlanStrategyChoice
 import java.awt.Desktop
@@ -37,156 +44,256 @@ import java.util.Locale
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun App(state: PlanState = remember { PlanState() }) {
+    var appImportingFile by remember { mutableStateOf<File?>(null) }
     MaterialTheme {
         Surface(
             modifier = Modifier.fillMaxSize(),
             color = MaterialTheme.colorScheme.background
         ) {
-            val activeReading = state.viewingDailyReading
-            if (activeReading != null) {
-                // Requirement 4: Open view at given day's reading
-                DailyReadingView(
-                    dailyReading = activeReading,
-                    manager = state.swordManager,
-                    onBack = { state.viewingDailyReading = null },
-                    onOpenDownload = { state.showDownloadDialog = true },
-                    onPreviousDay = if (state.hasPreviousDailyReading()) { { state.navigateDailyReading(-1) } } else null,
-                    onNextDay = if (state.hasNextDailyReading()) { { state.navigateDailyReading(1) } } else null
-                )
-            } else {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    // Header Bar
-                    Surface(
-                        tonalElevation = 2.dp,
-                        shadowElevation = 2.dp,
-                        modifier = Modifier.fillMaxWidth()
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Top Navigation Bar with Tabs
+                Surface(
+                    tonalElevation = 3.dp,
+                    shadowElevation = 2.dp,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 24.dp, vertical = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                        // Main Tabs: "Bible Reading plan" and "further study"
+                        TabRow(
+                            selectedTabIndex = if (state.currentTab == MainAppTab.READING_PLAN) 0 else 1,
+                            modifier = Modifier.width(440.dp),
+                            divider = {}
                         ) {
-                            Column {
-                                Text(
-                                    text = "Bible Reading Plan Generator",
-                                    style = MaterialTheme.typography.titleLarge,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "Customize book schedules, daily chapter goals, and completion strategies",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                            Tab(
+                                selected = state.currentTab == MainAppTab.READING_PLAN,
+                                onClick = { state.currentTab = MainAppTab.READING_PLAN },
+                                text = {
+                                    Text(
+                                        text = "Bible Reading plan",
+                                        fontWeight = if (state.currentTab == MainAppTab.READING_PLAN) FontWeight.Bold else FontWeight.Medium,
+                                        fontSize = 15.sp
+                                    )
+                                }
+                            )
+                            Tab(
+                                selected = state.currentTab == MainAppTab.FURTHER_STUDY,
+                                onClick = { state.currentTab = MainAppTab.FURTHER_STUDY },
+                                text = {
+                                    Text(
+                                        text = "further study",
+                                        fontWeight = if (state.currentTab == MainAppTab.FURTHER_STUDY) FontWeight.Bold else FontWeight.Medium,
+                                        fontSize = 15.sp
+                                    )
+                                }
+                            )
+                        }
+
+                        // Right side controls: Active Bible indicator & Download Modules button
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            state.swordManager.selectedBible?.let { activeBible ->
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .clickable { state.showDownloadDialog = true }
+                                ) {
+                                    Text(
+                                        text = "📖 ${activeBible.initials}",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                    )
+                                }
                             }
 
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                            OutlinedButton(
+                                onClick = {
+                                    openBookFileChooser { appImportingFile = it }
+                                }
                             ) {
-                                // Active Bible indicator if available
-                                state.swordManager.selectedBible?.let { activeBible ->
-                                    Surface(
-                                        shape = RoundedCornerShape(16.dp),
-                                        color = MaterialTheme.colorScheme.secondaryContainer,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(16.dp))
-                                            .clickable { state.showDownloadDialog = true }
-                                    ) {
-                                        Text(
-                                            text = "📖 ${activeBible.initials}",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                                        )
-                                    }
-                                }
+                                Text("📥 Import Book", fontWeight = FontWeight.SemiBold)
+                            }
 
-                                // Requirement 3: Button to download Bible on the main page
-                                OutlinedButton(
-                                    onClick = { state.showDownloadDialog = true }
-                                ) {
-                                    Text("📚 Download Bible", fontWeight = FontWeight.SemiBold)
-                                }
-
-                                Button(
-                                    onClick = { state.generatePlan() },
-                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                                ) {
-                                    Text("Generate Reading Plan", fontWeight = FontWeight.SemiBold)
-                                }
+                            OutlinedButton(
+                                onClick = { state.showDownloadDialog = true }
+                            ) {
+                                Text("📚 Download Modules", fontWeight = FontWeight.SemiBold)
                             }
                         }
                     }
+                }
 
-                    // Main Content: Split View (Settings on Left, Generated Plan on Right)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        // Left Column: Configuration Settings
-                        Card(
-                            modifier = Modifier
-                                .weight(1.05f)
-                                .fillMaxHeight(),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .verticalScroll(rememberScrollState())
-                                    .padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(16.dp)
-                            ) {
-                                // Section 1: Strategy Selection
-                                StrategySelectionSection(state)
-
-                                HorizontalDivider()
-
-                                // Section 2: Chapters Per Day Configuration
-                                ChaptersPerDaySection(state)
-
-                                // Section 3: Day-of-Week Specific Book & Continuation Settings
-                                if (state.selectedStrategyChoice == PlanStrategyChoice.DAY_OF_WEEK ||
-                                    state.selectedStrategyChoice == PlanStrategyChoice.CUSTOM_STRATEGY
-                                ) {
-                                    HorizontalDivider()
-                                    ContinuationStrategySection(state)
-
-                                    HorizontalDivider()
-                                    BooksByDaySection(state)
-                                }
-
-                                HorizontalDivider()
-
-                                // Section 4: Start Date
-                                StartDateSection(state)
+                // Active Tab Content
+                Box(modifier = Modifier.fillMaxSize().weight(1f)) {
+                    when (state.currentTab) {
+                        MainAppTab.READING_PLAN -> {
+                            val activeReading = state.viewingDailyReading
+                            if (activeReading != null) {
+                                DailyReadingView(
+                                    dailyReading = activeReading,
+                                    manager = state.swordManager,
+                                    audioService = state.audioService,
+                                    onBack = { state.viewingDailyReading = null },
+                                    onOpenDownload = { state.showDownloadDialog = true },
+                                    onOpenAudioSettings = { state.showAudioSettingsDialog = true },
+                                    onPreviousDay = if (state.hasPreviousDailyReading()) { { state.navigateDailyReading(-1) } } else null,
+                                    onNextDay = if (state.hasNextDailyReading()) { { state.navigateDailyReading(1) } } else null
+                                )
+                            } else {
+                                BibleReadingPlanView(state)
                             }
                         }
-
-                        // Right Column: Generated Plan View & Export
-                        Card(
-                            modifier = Modifier
-                                .weight(1.15f)
-                                .fillMaxHeight(),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
-                        ) {
-                            PlanResultsSection(state)
+                        MainAppTab.FURTHER_STUDY -> {
+                            FurtherStudyView(
+                                manager = state.swordManager,
+                                onOpenDownload = { state.showDownloadDialog = true }
+                            )
                         }
                     }
                 }
             }
 
-            // Requirement 3: Download dialog view
+            // Download dialog view
             if (state.showDownloadDialog) {
                 DownloadBibleDialog(
                     manager = state.swordManager,
                     onDismissRequest = { state.showDownloadDialog = false }
                 )
+            }
+
+            if (appImportingFile != null) {
+                ImportBookDialog(
+                    selectedFile = appImportingFile!!,
+                    manager = state.swordManager,
+                    onDismiss = { appImportingFile = null },
+                    onImportSuccess = {
+                        state.currentTab = MainAppTab.FURTHER_STUDY
+                    }
+                )
+            }
+
+            if (state.showAudioSettingsDialog) {
+                AudioSettingsDialog(
+                    audioService = state.audioService,
+                    onDismiss = { state.showAudioSettingsDialog = false }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BibleReadingPlanView(state: PlanState) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Header Bar
+        Surface(
+            tonalElevation = 2.dp,
+            shadowElevation = 2.dp,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(
+                        text = "Bible Reading Plan Generator",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Customize book schedules, daily chapter goals, and completion strategies",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(
+                        onClick = { state.showAudioSettingsDialog = true }
+                    ) {
+                        Text("🎧 Audio Bible", fontWeight = FontWeight.SemiBold)
+                    }
+
+                    Button(
+                        onClick = { state.generatePlan() },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                    ) {
+                        Text("Generate Reading Plan", fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
+
+        // Main Content: Split View (Settings on Left, Generated Plan on Right)
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Left Column: Configuration Settings
+            Card(
+                modifier = Modifier
+                    .weight(1.05f)
+                    .fillMaxHeight(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    // Section 1: Strategy Selection
+                    StrategySelectionSection(state)
+
+                    HorizontalDivider()
+
+                    // Section 2: Chapters Per Day Configuration
+                    ChaptersPerDaySection(state)
+
+                    // Section 3: Day-of-Week Specific Book & Continuation Settings
+                    if (state.selectedStrategyChoice == PlanStrategyChoice.DAY_OF_WEEK ||
+                        state.selectedStrategyChoice == PlanStrategyChoice.CUSTOM_STRATEGY
+                    ) {
+                        HorizontalDivider()
+                        ContinuationStrategySection(state)
+
+                        HorizontalDivider()
+                        BooksByDaySection(state)
+                    }
+
+                    HorizontalDivider()
+
+                    // Section 4: Start Date
+                    StartDateSection(state)
+                }
+            }
+
+            // Right Column: Generated Plan View & Export
+            Card(
+                modifier = Modifier
+                    .weight(1.15f)
+                    .fillMaxHeight(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+            ) {
+                PlanResultsSection(state)
             }
         }
     }
@@ -395,6 +502,10 @@ private fun ChaptersPerDaySection(state: PlanState) {
                     }
                 }
             }
+        }
+
+        if (state.audioService.player.currentTrack != null) {
+            AudioPlayerBar(player = state.audioService.player)
         }
     }
 }
@@ -1026,6 +1137,16 @@ private fun PlanResultsSection(state: PlanState) {
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
+                                    if (state.audioService.hasAudioForDailyReading(daily)) {
+                                        FilledTonalButton(
+                                            onClick = { state.audioService.playDailyReading(daily) },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            modifier = Modifier.height(28.dp)
+                                        ) {
+                                            Text("🎧 Listen", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                        }
+                                    }
+
                                     FilledTonalButton(
                                         onClick = { state.viewingDailyReading = daily },
                                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),

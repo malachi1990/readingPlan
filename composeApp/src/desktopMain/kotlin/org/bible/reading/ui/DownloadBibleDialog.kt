@@ -21,6 +21,7 @@ import kotlinx.coroutines.launch
 import org.bible.reading.jsword.SwordManager
 import org.crosswire.jsword.book.Book
 import org.crosswire.jsword.book.BookCategory
+import java.io.File
 
 enum class DownloadCategoryFilter(val displayName: String, val category: BookCategory?) {
     ALL("All", null),
@@ -441,6 +442,7 @@ private fun BrowseAndDownloadContent(
                 }
             }
         }
+
     }
 }
 
@@ -448,6 +450,7 @@ private fun BrowseAndDownloadContent(
 private fun InstalledBooksContent(manager: SwordManager) {
     val coroutineScope = rememberCoroutineScope()
     var locationFilter by remember { mutableStateOf(LocationFilter.ALL) }
+    var importingFile by remember { mutableStateOf<File?>(null) }
 
     val appBooks = remember(manager.installedBooks.toList()) {
         manager.installedBooks.filter { manager.isAppDirectoryBook(it) }
@@ -483,11 +486,20 @@ private fun InstalledBooksContent(manager: SwordManager) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Button(
-                onClick = { manager.refreshInstalledBooks() },
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
-            ) {
-                Text("Refresh Installed")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(
+                    onClick = {
+                        openBookFileChooser { importingFile = it }
+                    }
+                ) {
+                    Text("📥 Import Book")
+                }
+                Button(
+                    onClick = { manager.refreshInstalledBooks() },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
+                ) {
+                    Text("Refresh Installed")
+                }
             }
         }
 
@@ -641,6 +653,15 @@ private fun InstalledBooksContent(manager: SwordManager) {
                     }
                 }
             }
+        }
+
+        if (importingFile != null) {
+            ImportBookDialog(
+                selectedFile = importingFile!!,
+                manager = manager,
+                onDismiss = { importingFile = null },
+                onImportSuccess = {}
+            )
         }
     }
 }

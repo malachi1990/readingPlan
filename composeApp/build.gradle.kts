@@ -35,6 +35,8 @@ kotlin {
             implementation(libs.commons.codec)
             implementation(libs.commons.compress)
             implementation(libs.slf4j.simple)
+            implementation(libs.pdfbox)
+            implementation(libs.jlayer)
         }
     }
 }
@@ -50,4 +52,14 @@ compose.desktop {
             packageVersion = "1.0.0"
         }
     }
+}
+
+tasks.register<Exec>("buildFlatpak") {
+    description = ""
+    commandLine(
+        "flatpak-builder",
+        "--force-clean",
+        "build-dir",
+        "org.bible.reading.App.kt"
+    )
 }

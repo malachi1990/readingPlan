@@ -12,6 +12,8 @@ commons-net = "3.10.0"
 commons-codec = "1.16.1"
 commons-compress = "1.26.1"
 slf4j = "2.0.13"
+jlayer = "1.0.1"
+pdfbox = "3.0.4"
 
 [libraries]
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
@@ -27,6 +29,8 @@ commons-net = { module = "commons-net:commons-net", version.ref = "commons-net" 
 commons-codec = { module = "commons-codec:commons-codec", version.ref = "commons-codec" }
 commons-compress = { module = "org.apache.commons:commons-compress", version.ref = "commons-compress" }
 slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
+jlayer = { module = "javazoom:jlayer", version.ref = "jlayer" }
+pdfbox = { module = "org.apache.pdfbox:pdfbox", version.ref = "pdfbox" }
 
 [plugins]
 composeHotReload = { id = "org.jetbrains.compose.hot-reload", version.ref = "composeHotReload" }
