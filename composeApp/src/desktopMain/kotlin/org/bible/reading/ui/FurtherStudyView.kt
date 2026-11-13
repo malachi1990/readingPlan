@@ -20,6 +20,8 @@ import androidx.compose.ui.window.Dialog
 import org.bible.reading.jsword.ChapterPassage
 import org.bible.reading.jsword.ModuleBook
 import org.bible.reading.jsword.SwordManager
+import org.bible.reading.notes.NotesRepository
+import org.bible.reading.notes.ui.NotesPanel
 import org.crosswire.jsword.book.Book
 import org.crosswire.jsword.book.BookCategory
 import org.crosswire.jsword.book.sword.SwordBookMetaData
@@ -67,6 +69,9 @@ fun FurtherStudyView(
     // Import file dialog state
     var importingFile by remember { mutableStateOf<File?>(null) }
 
+    // Notes repository (disk-backed, shared for the lifetime of the view)
+    val notesRepository = remember { NotesRepository(manager.appDir) }
+
     // Parallel comparison mode state
     var isParallelMode by remember { mutableStateOf(false) }
     var secondaryModule by remember(manager.installedBooks) {
@@ -75,6 +80,9 @@ fun FurtherStudyView(
                 ?: manager.installedBooks.firstOrNull { it != selectedModule }
         )
     }
+
+    // Notes panel toggle
+    var isNotesMode by remember { mutableStateOf(false) }
 
     // Check if the current module is verse-based
     val isVerseBasedModule = selectedModule?.bookCategory == BookCategory.BIBLE ||
@@ -345,11 +353,7 @@ fun FurtherStudyView(
                                                             fontWeight = if (book == selectedModule) FontWeight.Bold else FontWeight.Normal
                                                         )
                                                         Spacer(Modifier.width(10.dp))
-                                                        Text(
-                                                            text = book.initials,
-                                                            color = MaterialTheme.colorScheme.primary,
-                                                            style = MaterialTheme.typography.labelSmall
-                                                        )
+
                                                     }
                                                     Text(
                                                         text = "${book.bookCategory.name} • ${manager.getBookLocationLabel(book)}",
@@ -430,7 +434,6 @@ fun FurtherStudyView(
                                                             fontWeight = if (book == secondaryModule) FontWeight.Bold else FontWeight.Normal
                                                         )
                                                         Spacer(Modifier.width(8.dp))
-                                                        Text("(${book.initials})", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                                                     }
                                                 },
                                                 onClick = {
@@ -442,6 +445,18 @@ fun FurtherStudyView(
                                     }
                                 }
                             }
+                        }
+
+                        // Notes Mode Toggle — available for all module types
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Switch(
+                                checked = isNotesMode,
+                                onCheckedChange = { isNotesMode = it }
+                            )
+                            Text("📝 Notes", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
                         }
                     }
                 }
@@ -861,7 +876,7 @@ fun FurtherStudyView(
                     } else null
 
                     if (isParallelMode && secondaryPassage != null) {
-                        // Split / Parallel View: 2 equal columns
+                        // Split / Parallel View: primary + secondary (+ optional notes)
                         Row(
                             modifier = Modifier
                                 .fillMaxSize()
@@ -882,12 +897,12 @@ fun FurtherStudyView(
                                     selectedVerseFilter = selectedVerseFilter,
                                     onCopy = {
                                         copyTextToClipboard(primaryPassage.fullText)
-                                        copyNotification = "Copied ${primaryPassage.bookName} ${primaryPassage.chapterNumber} (${selectedModule!!.initials}) to clipboard!"
+                                        copyNotification = "Copied ${primaryPassage.bookName} ${primaryPassage.chapterNumber} to clipboard!"
                                     }
                                 )
                             }
 
-                            // Right Column: Secondary Module
+                            // Centre Column: Secondary Module
                             Card(
                                 modifier = Modifier
                                     .weight(1f)
@@ -901,29 +916,60 @@ fun FurtherStudyView(
                                     selectedVerseFilter = selectedVerseFilter,
                                     onCopy = {
                                         copyTextToClipboard(secondaryPassage.fullText)
-                                        copyNotification = "Copied ${secondaryPassage.bookName} ${secondaryPassage.chapterNumber} (${secondaryModule!!.initials}) to clipboard!"
+                                        copyNotification = "Copied ${secondaryPassage.bookName} ${secondaryPassage.chapterNumber}  to clipboard!"
                                     }
+                                )
+                            }
+
+                            // Right Column: Notes (if enabled)
+                            if (isNotesMode && selectedModule != null) {
+                                NotesPanel(
+                                    repository = notesRepository,
+                                    moduleKey = selectedModule!!.initials,
+                                    moduleDisplayName = selectedModule!!.name,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
                                 )
                             }
                         }
                     } else {
-                        // Single Module Full View
-                        Card(
+                        // Single Module view (+ optional notes column)
+                        Row(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(16.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                            horizontalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
-                            PassageCardContent(
-                                passage = primaryPassage,
-                                book = selectedModule!!,
-                                fontSizeSp = fontSizeSp,
-                                selectedVerseFilter = selectedVerseFilter,
-                                onCopy = {
-                                    copyTextToClipboard(primaryPassage.fullText)
-                                    copyNotification = "Copied ${primaryPassage.bookName} ${primaryPassage.chapterNumber} (${selectedModule!!.initials}) to clipboard!"
-                                }
-                            )
+                            Card(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxHeight(),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                            ) {
+                                PassageCardContent(
+                                    passage = primaryPassage,
+                                    book = selectedModule!!,
+                                    fontSizeSp = fontSizeSp,
+                                    selectedVerseFilter = selectedVerseFilter,
+                                    onCopy = {
+                                        copyTextToClipboard(primaryPassage.fullText)
+                                        copyNotification = "Copied ${primaryPassage.bookName} ${primaryPassage.chapterNumber} to clipboard!"
+                                    }
+                                )
+                            }
+
+                            // Notes column (if enabled)
+                            if (isNotesMode && selectedModule != null) {
+                                NotesPanel(
+                                    repository = notesRepository,
+                                    moduleKey = selectedModule!!.initials,
+                                    moduleDisplayName = selectedModule!!.name,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                                )
+                            }
                         }
                     }
                 }
@@ -938,69 +984,88 @@ fun FurtherStudyView(
                     }
                 }
 
-                Card(
+                Row(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    Column(
+                    Card(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .padding(20.dp)
+                            .weight(1f)
+                            .fillMaxHeight(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
                     ) {
-                        // Header
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = activeKey?.name ?: "Section Content",
-                                    style = MaterialTheme.typography.headlineSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                                Text(
-                                    text = "${selectedModule?.name} (${selectedModule?.initials})",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                OutlinedButton(
-                                    onClick = {
-                                        copyTextToClipboard(keyContent)
-                                        copyNotification = "Copied ${activeKey?.name} to clipboard!"
-                                    },
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                    modifier = Modifier.height(32.dp)
-                                ) {
-                                    Text("📋 Copy", fontSize = 12.sp)
-                                }
-                            }
-                        }
-
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-
-                        // Text content
-                        Box(
+                        Column(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .verticalScroll(rememberScrollState())
+                                .padding(20.dp)
                         ) {
-                            Text(
-                                text = keyContent,
-                                fontSize = fontSizeSp.sp,
-                                lineHeight = (fontSizeSp + 8).sp,
-                                modifier = Modifier.padding(bottom = 32.dp)
-                            )
+                            // Header
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = activeKey?.name ?: "Section Content",
+                                        style = MaterialTheme.typography.headlineSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        text = "${selectedModule?.name}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            copyTextToClipboard(keyContent)
+                                            copyNotification = "Copied ${activeKey?.name} to clipboard!"
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.height(32.dp)
+                                    ) {
+                                        Text("📋 Copy", fontSize = 12.sp)
+                                    }
+                                }
+                            }
+
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
+                            // Text content
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .verticalScroll(rememberScrollState())
+                            ) {
+                                Text(
+                                    text = keyContent,
+                                    fontSize = fontSizeSp.sp,
+                                    lineHeight = (fontSizeSp + 8).sp,
+                                    modifier = Modifier.padding(bottom = 32.dp)
+                                )
+                            }
                         }
+                    }
+
+                    // Notes column for general book / dictionary view
+                    if (isNotesMode && selectedModule != null) {
+                        NotesPanel(
+                            repository = notesRepository,
+                            moduleKey = selectedModule!!.initials,
+                            moduleDisplayName = selectedModule!!.name,
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                        )
                     }
                 }
             }

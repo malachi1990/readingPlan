@@ -242,7 +242,7 @@ private fun BibleReadingPlanView(state: PlanState) {
         // Main Content: Split View (Settings on Left, Generated Plan on Right)
         Row(
             modifier = Modifier
-                .fillMaxSize()
+                .weight(1f)
                 .padding(16.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -295,6 +295,11 @@ private fun BibleReadingPlanView(state: PlanState) {
             ) {
                 PlanResultsSection(state)
             }
+        }
+
+        // Audio Player Bar: pinned to the bottom, full width
+        if (state.audioService.player.currentTrack != null) {
+            AudioPlayerBar(player = state.audioService.player)
         }
     }
 }
@@ -504,9 +509,6 @@ private fun ChaptersPerDaySection(state: PlanState) {
             }
         }
 
-        if (state.audioService.player.currentTrack != null) {
-            AudioPlayerBar(player = state.audioService.player)
-        }
     }
 }
 
@@ -987,186 +989,210 @@ private fun StartDateSection(state: PlanState) {
 private fun PlanResultsSection(state: PlanState) {
     val plan = state.readingPlan
     val dateFormatter = DateTimeFormatter.ofPattern("EEE, MMM d, yyyy")
+    var showSaveDialog by remember { mutableStateOf(false) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+    // Save-to-file dialog
+    if (showSaveDialog) {
+        SavePlanToFileDialog(
+            state = state,
+            onDismiss = { showSaveDialog = false }
+        )
+    }
+
+    if (plan == null) {
+        // Empty-state: no plan generated yet
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            contentAlignment = Alignment.Center
         ) {
-            Column {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     text = "Generated Reading Plan",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )
-                if (plan != null) {
-                    Text(
-                        text = "Click on any day's reading to open Scripture reading view",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
-            if (plan != null) {
+                Spacer(Modifier.height(16.dp))
                 Text(
-                    text = "${plan.readings.size} Total Days",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold
+                    text = "No Reading Plan Generated",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Configure your parameters on the left and click 'Generate Reading Plan' above to view your personalized daily schedule.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 24.dp)
                 )
             }
         }
+    } else {
+        val totalChapters = plan.readings.sumOf { it.reading.size }
+        val startDateStr = plan.readings.firstOrNull()?.date?.format(dateFormatter) ?: "N/A"
+        val endDateStr = plan.readings.lastOrNull()?.date?.format(dateFormatter) ?: "N/A"
 
-        if (plan == null) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(32.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "No Reading Plan Generated",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        text = "Configure your parameters on the left and click 'Generate Reading Plan' above to view your personalized daily schedule.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 24.dp)
-                    )
+        val filteredReadings = remember(plan, state.planSearchQuery) {
+            if (state.planSearchQuery.isBlank()) {
+                plan.readings
+            } else {
+                val query = state.planSearchQuery.trim().lowercase()
+                plan.readings.filter { daily ->
+                    daily.date.toString().lowercase().contains(query) ||
+                            daily.reading.any { it.book.lowercase().contains(query) }
                 }
             }
-        } else {
-            val totalChapters = plan.readings.sumOf { it.reading.size }
-            val startDateStr = plan.readings.firstOrNull()?.date?.format(dateFormatter) ?: "N/A"
-            val endDateStr = plan.readings.lastOrNull()?.date?.format(dateFormatter) ?: "N/A"
+        }
 
-            // Summary Stats Cards
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                StatCard(
-                    title = "Total Days",
-                    value = "${plan.readings.size}",
-                    modifier = Modifier.weight(1f)
-                )
-                StatCard(
-                    title = "Total Chapters",
-                    value = "$totalChapters",
-                    modifier = Modifier.weight(1f)
-                )
-                StatCard(
-                    title = "End Date",
-                    value = plan.readings.lastOrNull()?.date?.toString() ?: "",
-                    modifier = Modifier.weight(1.3f)
-                )
-            }
-
-            // Save to File Section
-            SavePlanToFileSection(state)
-
-            // Search Filter Bar
-            OutlinedTextField(
-                value = state.planSearchQuery,
-                onValueChange = { state.planSearchQuery = it },
-                label = { Text("Filter readings by book or date (e.g. Genesis or 2026-01)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            // Filtered daily readings list
-            val filteredReadings = remember(plan, state.planSearchQuery) {
-                if (state.planSearchQuery.isBlank()) {
-                    plan.readings
-                } else {
-                    val query = state.planSearchQuery.trim().lowercase()
-                    plan.readings.filter { daily ->
-                        daily.date.toString().lowercase().contains(query) ||
-                                daily.reading.any { it.book.lowercase().contains(query) }
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // ── Header ────────────────────────────────────────────────────────
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Generated Reading Plan",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Click on any day's reading to open Scripture reading view",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
                     }
+                    Text(
+                        text = "${plan.readings.size} Total Days",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
 
-            Text(
-                text = "Showing ${filteredReadings.size} of ${plan.readings.size} days (Start: $startDateStr • End: $endDateStr)",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            // ── Summary stat cards ────────────────────────────────────────────
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    StatCard(
+                        title = "Total Days",
+                        value = "${plan.readings.size}",
+                        modifier = Modifier.weight(1f)
+                    )
+                    StatCard(
+                        title = "Total Chapters",
+                        value = "$totalChapters",
+                        modifier = Modifier.weight(1f)
+                    )
+                    StatCard(
+                        title = "End Date",
+                        value = plan.readings.lastOrNull()?.date?.toString() ?: "",
+                        modifier = Modifier.weight(1.3f)
+                    )
+                }
+            }
 
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                itemsIndexed(filteredReadings) { _, daily ->
-                    // Requirement 4: Clickable reading card opening view at given day's reading
-                    ElevatedCard(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable { state.viewingDailyReading = daily },
-                        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
+            // ── Save to File button ───────────────────────────────────────────
+            item {
+                Button(
+                    onClick = { showSaveDialog = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                ) {
+                    Text("💾 Save Reading Plan to File", fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+            // ── Search filter ─────────────────────────────────────────────────
+            item {
+                OutlinedTextField(
+                    value = state.planSearchQuery,
+                    onValueChange = { state.planSearchQuery = it },
+                    label = { Text("Filter readings by book or date (e.g. Genesis or 2026-01)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            // ── Result count ──────────────────────────────────────────────────
+            item {
+                Text(
+                    text = "Showing ${filteredReadings.size} of ${plan.readings.size} days (Start: $startDateStr • End: $endDateStr)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            // ── Daily reading cards ───────────────────────────────────────────
+            itemsIndexed(filteredReadings) { _, daily ->
+                ElevatedCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { state.viewingDailyReading = daily },
+                    colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = daily.date.format(dateFormatter),
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Text(
-                                    text = daily.date.format(dateFormatter),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
+                                    text = "${daily.reading.size} chapters",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Text(
-                                        text = "${daily.reading.size} chapters",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    if (state.audioService.hasAudioForDailyReading(daily)) {
-                                        FilledTonalButton(
-                                            onClick = { state.audioService.playDailyReading(daily) },
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                            modifier = Modifier.height(28.dp)
-                                        ) {
-                                            Text("🎧 Listen", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                                        }
-                                    }
-
+                                if (state.audioService.hasAudioForDailyReading(daily)) {
                                     FilledTonalButton(
-                                        onClick = { state.viewingDailyReading = daily },
+                                        onClick = { state.audioService.playDailyReading(daily) },
                                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                         modifier = Modifier.height(28.dp)
                                     ) {
-                                        Text("Read 📖", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                        Text("🎧 Listen", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                                     }
                                 }
-                            }
-                            Spacer(Modifier.height(4.dp))
-                            val groupedText = daily.reading.groupBy { it.book }
-                                .entries.joinToString(" • ") { entry ->
-                                    val chapters = entry.value.map { it.chapterNumber }
-                                    "${entry.key} ${formatChapterRanges(chapters)}"
+
+                                FilledTonalButton(
+                                    onClick = { state.viewingDailyReading = daily },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Text("Read 📖", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                                 }
-                            Text(
-                                text = groupedText,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
+                            }
                         }
+                        Spacer(Modifier.height(4.dp))
+                        val groupedText = daily.reading.groupBy { it.book }
+                            .entries.joinToString(" • ") { entry ->
+                                val chapters = entry.value.map { it.chapterNumber }
+                                "${entry.key} ${formatChapterRanges(chapters)}"
+                            }
+                        Text(
+                            text = groupedText,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
                     }
                 }
             }
@@ -1175,52 +1201,33 @@ private fun PlanResultsSection(state: PlanState) {
 }
 
 @Composable
-private fun SavePlanToFileSection(state: PlanState) {
-
-    OutlinedCard(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.outlinedCardColors(containerColor = MaterialTheme.colorScheme.surface)
-    ) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(
+private fun SavePlanToFileDialog(state: PlanState, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "Save Reading Plan to File",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Column {
-                    Text(
-                        text = "Save Reading Plan to File",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "User-specified directory (default: ~/downloads)",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                Text(
+                    text = "Choose a directory, file name, and format for your reading plan export.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
-                Button(
-                    onClick = { state.savePlanToFile() },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-                ) {
-                    Text("Save to File", fontWeight = FontWeight.SemiBold)
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
                 OutlinedTextField(
                     value = state.saveDirectory,
                     onValueChange = { state.saveDirectory = it },
                     label = { Text("Directory (default: ~/downloads)") },
                     singleLine = true,
-                    modifier = Modifier.weight(1.5f)
+                    modifier = Modifier.fillMaxWidth()
                 )
 
                 OutlinedTextField(
@@ -1228,76 +1235,89 @@ private fun SavePlanToFileSection(state: PlanState) {
                     onValueChange = { state.saveFileName = it },
                     label = { Text("File Name") },
                     singleLine = true,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.fillMaxWidth()
                 )
-            }
 
-            // Export format chips
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Format:",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.Medium
-                )
-                ExportFormat.entries.forEach { format ->
-                    FilterChip(
-                        selected = state.saveFormat == format,
-                        onClick = { state.saveFormat = format },
-                        label = { Text(format.displayName, fontSize = 12.sp) }
-                    )
-                }
-            }
-
-            // Feedback / Status Message
-            state.saveStatusMessage?.let { msg ->
-                val bgColor = if (state.isSaveSuccess) {
-                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-                } else {
-                    MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
-                }
-                val textColor = if (state.isSaveSuccess) {
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                } else {
-                    MaterialTheme.colorScheme.onErrorContainer
-                }
-
+                // Export format chips
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(bgColor, RoundedCornerShape(6.dp))
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = msg,
+                        text = "Format:",
                         style = MaterialTheme.typography.bodySmall,
-                        color = textColor,
-                        modifier = Modifier.weight(1f)
+                        fontWeight = FontWeight.Medium
                     )
+                    ExportFormat.entries.forEach { format ->
+                        FilterChip(
+                            selected = state.saveFormat == format,
+                            onClick = { state.saveFormat = format },
+                            label = { Text(format.displayName, fontSize = 12.sp) }
+                        )
+                    }
+                }
 
-                    if (state.isSaveSuccess && state.lastSavedFile != null) {
-                        TextButton(
-                            onClick = {
-                                try {
-                                    if (Desktop.isDesktopSupported()) {
-                                        Desktop.getDesktop().open(state.lastSavedFile)
-                                    }
-                                } catch (_: Exception) {}
-                            },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                        ) {
-                            Text("Open", style = MaterialTheme.typography.labelSmall)
+                // Feedback / Status Message
+                state.saveStatusMessage?.let { msg ->
+                    val bgColor = if (state.isSaveSuccess) {
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                    } else {
+                        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+                    }
+                    val textColor = if (state.isSaveSuccess) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onErrorContainer
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(bgColor, RoundedCornerShape(6.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = msg,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = textColor,
+                            modifier = Modifier.weight(1f)
+                        )
+
+                        if (state.isSaveSuccess && state.lastSavedFile != null) {
+                            TextButton(
+                                onClick = {
+                                    try {
+                                        if (Desktop.isDesktopSupported()) {
+                                            Desktop.getDesktop().open(state.lastSavedFile)
+                                        }
+                                    } catch (_: Exception) {}
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text("Open File", style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                     }
                 }
             }
+        },
+        confirmButton = {
+            Button(
+                onClick = { state.savePlanToFile() },
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+            ) {
+                Text("Save to File", fontWeight = FontWeight.SemiBold)
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("Close")
+            }
         }
-    }
+    )
 }
 
 private fun formatChapterRanges(chapters: List<Int>): String {

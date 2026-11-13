@@ -4,7 +4,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.bible.reading.dto.Reading
 import org.bible.reading.importer.service.BookImportService
@@ -168,6 +170,9 @@ class SwordManager(
                 }
                 books
             } catch (e: Exception) {
+                if (e is CancellationException) {
+                    ensureActive()
+                }
                 withContext(Dispatchers.Main) {
                     reloadStatusMessage = "Failed to load books: ${e.message}"
                     isOperationSuccess = false

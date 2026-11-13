@@ -19,7 +19,6 @@ import org.bible.reading.audio.service.AudioBibleService
 import org.bible.reading.audio.ui.AudioPlayerBar
 import java.time.format.DateTimeFormatter
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DailyReadingView(
     dailyReading: DailyReading,
