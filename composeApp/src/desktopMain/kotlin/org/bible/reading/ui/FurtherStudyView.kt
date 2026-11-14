@@ -22,6 +22,9 @@ import org.bible.reading.jsword.ModuleBook
 import org.bible.reading.jsword.SwordManager
 import org.bible.reading.notes.NotesRepository
 import org.bible.reading.notes.ui.NotesPanel
+import org.bible.reading.audio.player.AudioBiblePlayer
+import org.bible.reading.audio.ui.AudioPlayerBar
+import org.bible.reading.tts.TtsService
 import org.crosswire.jsword.book.Book
 import org.crosswire.jsword.book.BookCategory
 import org.crosswire.jsword.book.sword.SwordBookMetaData
@@ -44,7 +47,10 @@ enum class ModuleCategoryTab(val displayName: String, val category: BookCategory
 @Composable
 fun FurtherStudyView(
     manager: SwordManager,
-    onOpenDownload: () -> Unit
+    ttsService: TtsService,
+    audioPlayer: AudioBiblePlayer,
+    onOpenDownload: () -> Unit,
+    onOpenTtsSettings: () -> Unit
 ) {
     // Category filter for module selector
     var categoryTab by remember { mutableStateOf(ModuleCategoryTab.ALL) }
@@ -447,6 +453,15 @@ fun FurtherStudyView(
                             }
                         }
 
+                        // Voice Settings Button
+                        OutlinedButton(
+                            onClick = onOpenTtsSettings,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Text("🔊 Voice", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        }
+
                         // Notes Mode Toggle — available for all module types
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -817,8 +832,46 @@ fun FurtherStudyView(
                 }
             }
 
+            // TTS Status notification if synthesizing or downloading
+            ttsService.statusMessage?.let { statusMsg ->
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (ttsService.isSynthesizing || ttsService.isDownloading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        }
+                        Text(
+                            text = statusMsg,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (ttsService.isSynthesizing) {
+                            TextButton(
+                                onClick = { ttsService.stopReading(audioPlayer) },
+                                contentPadding = PaddingValues(0.dp),
+                                modifier = Modifier.height(24.dp)
+                            ) {
+                                Text("Cancel", fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+            }
+
             // Main Reader Content Area
-            if (selectedModule == null) {
+            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                if (selectedModule == null) {
                 // Empty state if no modules installed
                 Box(
                     modifier = Modifier
@@ -884,6 +937,10 @@ fun FurtherStudyView(
                             horizontalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
                             // Left Column: Primary Module
+                            val primaryTrackTitle = "${primaryPassage.bookName} ${primaryPassage.chapterNumber} (${selectedModule!!.initials})"
+                            val isPrimaryReading = audioPlayer.isTrackActive(primaryTrackTitle)
+                            val isPrimarySynthesizing = ttsService.isSynthesizing && ttsService.currentReadingTitle == primaryTrackTitle
+
                             Card(
                                 modifier = Modifier
                                     .weight(1f)
@@ -895,6 +952,19 @@ fun FurtherStudyView(
                                     book = selectedModule!!,
                                     fontSizeSp = fontSizeSp,
                                     selectedVerseFilter = selectedVerseFilter,
+                                    isReading = isPrimaryReading,
+                                    isSynthesizing = isPrimarySynthesizing,
+                                    onReadPassage = {
+                                        ttsService.readPassage(primaryPassage, selectedModule!!, audioPlayer)
+                                    },
+                                    onReadVerse = { vNum, vText ->
+                                        ttsService.readVerse(
+                                            reference = "${primaryPassage.bookName} ${primaryPassage.chapterNumber}:$vNum",
+                                            verseText = vText,
+                                            bookInitials = selectedModule!!.initials,
+                                            player = audioPlayer
+                                        )
+                                    },
                                     onCopy = {
                                         copyTextToClipboard(primaryPassage.fullText)
                                         copyNotification = "Copied ${primaryPassage.bookName} ${primaryPassage.chapterNumber} to clipboard!"
@@ -903,6 +973,10 @@ fun FurtherStudyView(
                             }
 
                             // Centre Column: Secondary Module
+                            val secondaryTrackTitle = "${secondaryPassage.bookName} ${secondaryPassage.chapterNumber} (${secondaryModule!!.initials})"
+                            val isSecondaryReading = audioPlayer.isTrackActive(secondaryTrackTitle)
+                            val isSecondarySynthesizing = ttsService.isSynthesizing && ttsService.currentReadingTitle == secondaryTrackTitle
+
                             Card(
                                 modifier = Modifier
                                     .weight(1f)
@@ -914,6 +988,19 @@ fun FurtherStudyView(
                                     book = secondaryModule!!,
                                     fontSizeSp = fontSizeSp,
                                     selectedVerseFilter = selectedVerseFilter,
+                                    isReading = isSecondaryReading,
+                                    isSynthesizing = isSecondarySynthesizing,
+                                    onReadPassage = {
+                                        ttsService.readPassage(secondaryPassage, secondaryModule!!, audioPlayer)
+                                    },
+                                    onReadVerse = { vNum, vText ->
+                                        ttsService.readVerse(
+                                            reference = "${secondaryPassage.bookName} ${secondaryPassage.chapterNumber}:$vNum",
+                                            verseText = vText,
+                                            bookInitials = secondaryModule!!.initials,
+                                            player = audioPlayer
+                                        )
+                                    },
                                     onCopy = {
                                         copyTextToClipboard(secondaryPassage.fullText)
                                         copyNotification = "Copied ${secondaryPassage.bookName} ${secondaryPassage.chapterNumber}  to clipboard!"
@@ -941,6 +1028,10 @@ fun FurtherStudyView(
                                 .padding(16.dp),
                             horizontalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
+                            val primaryTrackTitle = "${primaryPassage.bookName} ${primaryPassage.chapterNumber} (${selectedModule!!.initials})"
+                            val isPrimaryReading = audioPlayer.isTrackActive(primaryTrackTitle)
+                            val isPrimarySynthesizing = ttsService.isSynthesizing && ttsService.currentReadingTitle == primaryTrackTitle
+
                             Card(
                                 modifier = Modifier
                                     .weight(1f)
@@ -952,6 +1043,19 @@ fun FurtherStudyView(
                                     book = selectedModule!!,
                                     fontSizeSp = fontSizeSp,
                                     selectedVerseFilter = selectedVerseFilter,
+                                    isReading = isPrimaryReading,
+                                    isSynthesizing = isPrimarySynthesizing,
+                                    onReadPassage = {
+                                        ttsService.readPassage(primaryPassage, selectedModule!!, audioPlayer)
+                                    },
+                                    onReadVerse = { vNum, vText ->
+                                        ttsService.readVerse(
+                                            reference = "${primaryPassage.bookName} ${primaryPassage.chapterNumber}:$vNum",
+                                            verseText = vText,
+                                            bookInitials = selectedModule!!.initials,
+                                            player = audioPlayer
+                                        )
+                                    },
                                     onCopy = {
                                         copyTextToClipboard(primaryPassage.fullText)
                                         copyNotification = "Copied ${primaryPassage.bookName} ${primaryPassage.chapterNumber} to clipboard!"
@@ -1025,6 +1129,37 @@ fun FurtherStudyView(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
+                                    val sectionTitle = if (!selectedModule?.name.isNullOrBlank()) "${activeKey?.name ?: "Section"} • ${selectedModule?.name}" else activeKey?.name ?: "Section"
+                                    val isSectionReading = audioPlayer.isTrackActive(sectionTitle)
+                                    val isSectionSynthesizing = ttsService.isSynthesizing && ttsService.currentReadingTitle == sectionTitle
+
+                                    FilledTonalButton(
+                                        onClick = {
+                                            ttsService.readSection(
+                                                title = activeKey?.name ?: "Section",
+                                                subtitle = selectedModule?.name ?: "",
+                                                content = keyContent,
+                                                player = audioPlayer
+                                            )
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.height(32.dp)
+                                    ) {
+                                        if (isSectionSynthesizing) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(13.dp),
+                                                strokeWidth = 2.dp,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                            Spacer(Modifier.width(6.dp))
+                                            Text("Loading...", fontSize = 12.sp)
+                                        } else if (isSectionReading) {
+                                            Text("⏹ Stop Audio", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                        } else {
+                                            Text("🔊 Read Section", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                        }
+                                    }
+
                                     OutlinedButton(
                                         onClick = {
                                             copyTextToClipboard(keyContent)
@@ -1070,6 +1205,7 @@ fun FurtherStudyView(
                 }
             }
         }
+    }
 
         // Module Info Dialog
         if (showModuleInfoDialog && selectedModule != null) {
@@ -1101,6 +1237,10 @@ private fun PassageCardContent(
     book: Book,
     fontSizeSp: Int,
     selectedVerseFilter: Int,
+    isReading: Boolean = false,
+    isSynthesizing: Boolean = false,
+    onReadPassage: () -> Unit = {},
+    onReadVerse: (verseNumber: Int, text: String) -> Unit = { _, _ -> },
     onCopy: () -> Unit
 ) {
     Column(
@@ -1128,11 +1268,36 @@ private fun PassageCardContent(
                 )
             }
 
-            IconButton(
-                onClick = onCopy,
-                modifier = Modifier.size(32.dp)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("📋", fontSize = 16.sp)
+                FilledTonalButton(
+                    onClick = onReadPassage,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.height(32.dp)
+                ) {
+                    if (isSynthesizing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(13.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Loading...", fontSize = 12.sp)
+                    } else if (isReading) {
+                        Text("⏹ Stop Audio", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    } else {
+                        Text("🔊 Read Chapter", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    }
+                }
+
+                IconButton(
+                    onClick = onCopy,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Text("📋", fontSize = 16.sp)
+                }
             }
         }
 
@@ -1211,6 +1376,13 @@ private fun PassageCardContent(
                             lineHeight = (fontSizeSp + 8).sp,
                             modifier = Modifier.weight(1f)
                         )
+
+                        IconButton(
+                            onClick = { onReadVerse(verse.verseNumber, verse.text) },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Text("🔊", fontSize = 12.sp)
+                        }
                     }
                 }
             }

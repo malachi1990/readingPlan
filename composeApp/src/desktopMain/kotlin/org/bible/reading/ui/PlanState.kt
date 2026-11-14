@@ -18,6 +18,7 @@ import org.bible.reading.strategy.SimpleSequentialStrategy
 import org.bible.reading.strategy.Strategy
 import org.bible.reading.strategy.StrategyRegistry
 import org.bible.reading.strategy.WeekdayOnlyStrategy
+import org.bible.reading.tts.TtsService
 import java.io.File
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -48,6 +49,10 @@ class PlanState {
     // Audio Bible Service & settings dialog
     val audioService: AudioBibleService = AudioBibleService(swordManager.appDir)
     var showAudioSettingsDialog by mutableStateOf(false)
+
+    // Text-to-Speech Service & settings dialog
+    val ttsService: TtsService = TtsService(swordManager.appDir)
+    var showTtsSettingsDialog by mutableStateOf(false)
 
     // Strategy selection
     var selectedStrategyChoice by mutableStateOf(PlanStrategyChoice.DAY_OF_WEEK)

@@ -416,9 +416,7 @@ fun DailyReadingView(
                 }
             }
 
-            if (audioService?.player?.currentTrack != null) {
-                AudioPlayerBar(player = audioService.player)
-            }
+
         }
     }
 }

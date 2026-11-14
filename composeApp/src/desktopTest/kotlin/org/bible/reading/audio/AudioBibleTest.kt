@@ -1,6 +1,8 @@
 package org.bible.reading.audio
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.bible.reading.audio.player.AudioCodec
 import org.bible.reading.audio.player.AudioCodecRegistry
 import org.bible.reading.audio.player.AudioStreamSession
@@ -238,14 +240,20 @@ class AudioBibleTest {
 
     @Test
     fun testAudioBibleServiceIndexingAndReadingMatching() = runBlocking {
-        val tempAppDir = Files.createTempDirectory("audio_service_app_dir").toFile()
+        val tempAppDir = withContext(Dispatchers.IO) {
+            Files.createTempDirectory("audio_service_app_dir")
+        }.toFile()
         tempAppDir.deleteOnExit()
 
-        val audioDir = Files.createTempDirectory("audio_bible_files").toFile()
+        val audioDir = withContext(Dispatchers.IO) {
+            Files.createTempDirectory("audio_bible_files")
+        }.toFile()
         audioDir.deleteOnExit()
 
         // Create mock audio Bible files
         val gen1 = File(audioDir, "01_Genesis_01.mp3").apply { createNewFile() }
+        val gen2 = File(audioDir, "01_Genesis_02.mp3").apply { createNewFile() }
+        val mat1 = File(audioDir, "40_Matthew_01.mp3").apply { createNewFile() }
 
         val service = AudioBibleService(tempAppDir)
         service.setAudioDirectory(audioDir.absolutePath)

@@ -139,6 +139,14 @@ class AudioBiblePlayer(
         isPlaying = false
         isPaused = false
         currentPositionMs = 0L
+        currentTrack = null
+    }
+
+    /**
+     * Stops playback and dismisses the active track and audio player widget.
+     */
+    fun dismiss() {
+        stop()
     }
 
     fun seekTo(positionMs: Long) {
@@ -172,6 +180,20 @@ class AudioBiblePlayer(
             currentTrackIndex--
             startCurrentTrack()
         }
+    }
+
+    /**
+     * Checks if the player currently has a track with the given title active or playing.
+     */
+    fun isTrackActive(title: String): Boolean {
+        return (isPlaying || isPaused) && currentTrack?.title == title
+    }
+
+    /**
+     * Checks if the player is actively playing (not paused) a track with the given title.
+     */
+    fun isActivelyPlaying(title: String): Boolean {
+        return isPlaying && currentTrack?.title == title
     }
 
     private fun handleTrackCompletion() {

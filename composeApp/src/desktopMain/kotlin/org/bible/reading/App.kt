@@ -28,6 +28,7 @@ import org.bible.reading.ui.DownloadBibleDialog
 import org.bible.reading.ui.FurtherStudyView
 import org.bible.reading.audio.ui.AudioPlayerBar
 import org.bible.reading.audio.ui.AudioSettingsDialog
+import org.bible.reading.tts.ui.TtsSettingsDialog
 import org.bible.reading.ui.ImportBookDialog
 import org.bible.reading.ui.openBookFileChooser
 import java.io.File
@@ -118,6 +119,12 @@ fun App(state: PlanState = remember { PlanState() }) {
                             }
 
                             OutlinedButton(
+                                onClick = { state.showTtsSettingsDialog = true }
+                            ) {
+                                Text("🔊 Voice Settings", fontWeight = FontWeight.SemiBold)
+                            }
+
+                            OutlinedButton(
                                 onClick = {
                                     openBookFileChooser { appImportingFile = it }
                                 }
@@ -135,7 +142,7 @@ fun App(state: PlanState = remember { PlanState() }) {
                 }
 
                 // Active Tab Content
-                Box(modifier = Modifier.fillMaxSize().weight(1f)) {
+                Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                     when (state.currentTab) {
                         MainAppTab.READING_PLAN -> {
                             val activeReading = state.viewingDailyReading
@@ -157,10 +164,24 @@ fun App(state: PlanState = remember { PlanState() }) {
                         MainAppTab.FURTHER_STUDY -> {
                             FurtherStudyView(
                                 manager = state.swordManager,
-                                onOpenDownload = { state.showDownloadDialog = true }
+                                ttsService = state.ttsService,
+                                audioPlayer = state.audioService.player,
+                                onOpenDownload = { state.showDownloadDialog = true },
+                                onOpenTtsSettings = { state.showTtsSettingsDialog = true }
                             )
                         }
                     }
+                }
+
+                // Global Audio Player Bar pinned to bottom of the window
+                val globalAudioPlayer = state.audioService.player
+                if (globalAudioPlayer.currentTrack != null || state.ttsService.isSynthesizing) {
+                    AudioPlayerBar(
+                        player = globalAudioPlayer,
+                        isSynthesizing = state.ttsService.isSynthesizing,
+                        synthesizingTitle = state.ttsService.currentReadingTitle,
+                        onCancelSynthesis = { state.ttsService.stopReading(globalAudioPlayer) }
+                    )
                 }
             }
 
@@ -187,6 +208,14 @@ fun App(state: PlanState = remember { PlanState() }) {
                 AudioSettingsDialog(
                     audioService = state.audioService,
                     onDismiss = { state.showAudioSettingsDialog = false }
+                )
+            }
+
+            if (state.showTtsSettingsDialog) {
+                TtsSettingsDialog(
+                    ttsService = state.ttsService,
+                    player = state.audioService.player,
+                    onDismiss = { state.showTtsSettingsDialog = false }
                 )
             }
         }
@@ -297,10 +326,6 @@ private fun BibleReadingPlanView(state: PlanState) {
             }
         }
 
-        // Audio Player Bar: pinned to the bottom, full width
-        if (state.audioService.player.currentTrack != null) {
-            AudioPlayerBar(player = state.audioService.player)
-        }
     }
 }
 

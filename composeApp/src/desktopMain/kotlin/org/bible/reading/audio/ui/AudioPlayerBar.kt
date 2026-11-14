@@ -15,9 +15,13 @@ import org.bible.reading.audio.player.AudioBiblePlayer
 @Composable
 fun AudioPlayerBar(
     player: AudioBiblePlayer,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isSynthesizing: Boolean = false,
+    synthesizingTitle: String? = null,
+    onCancelSynthesis: (() -> Unit)? = null
 ) {
-    val track = player.currentTrack ?: return
+    val track = player.currentTrack
+    if (track == null && !isSynthesizing) return
 
     Surface(
         modifier = modifier
@@ -27,157 +31,205 @@ fun AudioPlayerBar(
         tonalElevation = 6.dp,
         shadowElevation = 8.dp
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            // Top Row: Track info, playlist index, and error/status
+        if (track == null && isSynthesizing) {
+            // Synthesis / loading state before audio stream starts
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 14.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("🎧", fontSize = 16.sp)
-                    Text(
-                        text = track.title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.5.dp,
                         color = MaterialTheme.colorScheme.primary
                     )
-                    if (player.playlist.size > 1) {
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = MaterialTheme.colorScheme.secondaryContainer
-                        ) {
+                    Column {
+                        Text(
+                            text = "Synthesizing Speech...",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        if (!synthesizingTitle.isNullOrBlank()) {
                             Text(
-                                text = "${player.currentTrackIndex + 1} of ${player.playlist.size}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                text = synthesizingTitle,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
-                    Text(
-                        text = "(${track.file.name})",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (player.errorMessage != null) {
+                if (onCancelSynthesis != null) {
+                    OutlinedButton(
+                        onClick = onCancelSynthesis,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Text("Cancel", fontSize = 12.sp)
+                    }
+                }
+            }
+        } else if (track != null) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                // Top Row: Track info, playlist index, and error/status
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("🎧", fontSize = 16.sp)
                         Text(
-                            text = player.errorMessage!!,
+                            text = track.title,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        if (player.playlist.size > 1) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.secondaryContainer
+                            ) {
+                                Text(
+                                    text = "${player.currentTrackIndex + 1} of ${player.playlist.size}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                        val subtitleText = if (track.subtitle.isNotBlank()) track.subtitle else "(${track.file.name})"
+                        Text(
+                            text = subtitleText,
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                            maxLines = 1
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
 
-                    // Dismiss button
-                    IconButton(
-                        onClick = { player.stop() },
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Text("✕", fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (player.errorMessage != null) {
+                            Text(
+                                text = player.errorMessage!!,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                maxLines = 1
+                            )
+                        }
 
-            // Middle Row: Slider & Timers
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text(
-                    text = formatDuration(player.currentPositionMs),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.width(42.dp)
-                )
-
-                val duration = if (player.durationMs > 0) player.durationMs else 1L
-                val progress = (player.currentPositionMs.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
-
-                Slider(
-                    value = progress,
-                    onValueChange = { frac ->
-                        val targetMs = (frac * duration).toLong()
-                        player.seekTo(targetMs)
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-
-                Text(
-                    text = if (player.durationMs > 0) formatDuration(player.durationMs) else "--:--",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.width(42.dp)
-                )
-            }
-
-            // Bottom Row: Playback Controls & Volume
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Playback Controls
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    FilledTonalIconButton(
-                        onClick = { player.previousTrack() },
-                        enabled = player.playlist.size > 1 || player.currentPositionMs > 3000L,
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Text("⏮", fontSize = 14.sp)
-                    }
-
-                    FilledIconButton(
-                        onClick = { player.togglePlayPause() },
-                        modifier = Modifier.size(40.dp)
-                    ) {
-                        Text(if (player.isPlaying && !player.isPaused) "⏸" else "▶", fontSize = 16.sp)
-                    }
-
-                    FilledTonalIconButton(
-                        onClick = { player.stop() },
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Text("⏹", fontSize = 14.sp)
-                    }
-
-                    FilledTonalIconButton(
-                        onClick = { player.nextTrack() },
-                        enabled = player.currentTrackIndex < player.playlist.lastIndex,
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Text("⏭", fontSize = 14.sp)
+                        // Dismiss button
+                        IconButton(
+                            onClick = { player.stop() },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Text("✕", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
 
-                // Volume slider
+                // Middle Row: Slider & Timers
                 Row(
+                    modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.widthIn(max = 200.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text(if (player.volume <= 0.001f) "🔇" else if (player.volume < 0.5f) "🔉" else "🔊", fontSize = 14.sp)
+                    Text(
+                        text = formatDuration(player.currentPositionMs),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.width(42.dp)
+                    )
+
+                    val duration = if (player.durationMs > 0) player.durationMs else 1L
+                    val progress = (player.currentPositionMs.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+
                     Slider(
-                        value = player.volume,
-                        onValueChange = { player.setVolumeLevel(it) },
-                        valueRange = 0f..1f,
+                        value = progress,
+                        onValueChange = { frac ->
+                            val targetMs = (frac * duration).toLong()
+                            player.seekTo(targetMs)
+                        },
                         modifier = Modifier.weight(1f)
                     )
+
+                    Text(
+                        text = if (player.durationMs > 0) formatDuration(player.durationMs) else "--:--",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.width(42.dp)
+                    )
+                }
+
+                // Bottom Row: Playback Controls & Volume
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Playback Controls
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilledTonalIconButton(
+                            onClick = { player.previousTrack() },
+                            enabled = player.playlist.size > 1 || player.currentPositionMs > 3000L,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Text("⏮", fontSize = 14.sp)
+                        }
+
+                        FilledIconButton(
+                            onClick = { player.togglePlayPause() },
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Text(if (player.isPlaying && !player.isPaused) "⏸" else "▶", fontSize = 16.sp)
+                        }
+
+                        FilledTonalIconButton(
+                            onClick = { player.stop() },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Text("⏹", fontSize = 14.sp)
+                        }
+
+                        FilledTonalIconButton(
+                            onClick = { player.nextTrack() },
+                            enabled = player.currentTrackIndex < player.playlist.lastIndex,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Text("⏭", fontSize = 14.sp)
+                        }
+                    }
+
+                    // Volume slider
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.widthIn(max = 200.dp)
+                    ) {
+                        Text(if (player.volume <= 0.001f) "🔇" else if (player.volume < 0.5f) "🔉" else "🔊", fontSize = 14.sp)
+                        Slider(
+                            value = player.volume,
+                            onValueChange = { player.setVolumeLevel(it) },
+                            valueRange = 0f..1f,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 }
             }
         }
