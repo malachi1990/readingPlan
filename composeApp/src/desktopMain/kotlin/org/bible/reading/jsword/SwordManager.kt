@@ -266,6 +266,17 @@ class SwordManager(
     }
 
     /**
+     * Imports multiple books from local files, converts each into an OSIS RawGenBook Sword module in ~/.bibleReadingPlan,
+     * and refreshes the installed module list.
+     */
+    suspend fun importBooks(
+        files: List<File>,
+        onProgress: ((fileIndex: Int, totalFiles: Int, file: File, step: String) -> Unit)? = null
+    ): List<Result<Book>> {
+        return importService.importFiles(files, onProgress)
+    }
+
+    /**
      * Convenience method specifically for importing EPUB files.
      */
     suspend fun importEpub(file: File, onProgress: ((String) -> Unit)? = null): Result<Book> = importBook(file, onProgress)

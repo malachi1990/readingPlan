@@ -17,14 +17,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import kotlinx.coroutines.launch
 import org.bible.reading.jsword.ChapterPassage
 import org.bible.reading.jsword.ModuleBook
 import org.bible.reading.jsword.SwordManager
 import org.bible.reading.notes.NotesRepository
 import org.bible.reading.notes.ui.NotesPanel
 import org.bible.reading.audio.player.AudioBiblePlayer
-import org.bible.reading.audio.ui.AudioPlayerBar
 import org.bible.reading.tts.TtsService
+import org.bible.reading.tts.TtsTextCleaner
+import org.bible.reading.tts.ui.TtsFileUtils
 import org.crosswire.jsword.book.Book
 import org.crosswire.jsword.book.BookCategory
 import org.crosswire.jsword.book.sword.SwordBookMetaData
@@ -52,6 +54,8 @@ fun FurtherStudyView(
     onOpenDownload: () -> Unit,
     onOpenTtsSettings: () -> Unit
 ) {
+    val coroutineScope = rememberCoroutineScope()
+
     // Category filter for module selector
     var categoryTab by remember { mutableStateOf(ModuleCategoryTab.ALL) }
 
@@ -73,7 +77,7 @@ fun FurtherStudyView(
     var showModuleInfoDialog by remember { mutableStateOf(false) }
 
     // Import file dialog state
-    var importingFile by remember { mutableStateOf<File?>(null) }
+    var importingFiles by remember { mutableStateOf<List<File>?>(null) }
 
     // Notes repository (disk-backed, shared for the lifetime of the view)
     val notesRepository = remember { NotesRepository(manager.appDir) }
@@ -246,17 +250,17 @@ fun FurtherStudyView(
                                 }
                             }
 
-                            // Import external book (EPUB) button
+                            // Import external book(s) (EPUB, PDF) button
                             OutlinedButton(
                                 onClick = {
-                                    openBookFileChooser { file ->
-                                        importingFile = file
+                                    openBooksFileChooser { files ->
+                                        importingFiles = files
                                     }
                                 },
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                 modifier = Modifier.height(36.dp)
                             ) {
-                                Text("📥 Import Book", fontSize = 12.sp)
+                                Text("📥 Import Books", fontSize = 12.sp)
                             }
 
                             // Download more modules shortcut
@@ -297,7 +301,7 @@ fun FurtherStudyView(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         // Primary Module Dropdown
-                        val filteredBooks = remember(manager.installedBooks, categoryTab) {
+                        val filteredBooks = remember(manager.installedBooks.size, manager.installedBooks.toList(), categoryTab) {
                             when (categoryTab) {
                                 ModuleCategoryTab.ALL -> manager.installedBooks.toList()
                                 else -> manager.installedBooks.filter { it.bookCategory == categoryTab.category }
@@ -359,7 +363,6 @@ fun FurtherStudyView(
                                                             fontWeight = if (book == selectedModule) FontWeight.Bold else FontWeight.Normal
                                                         )
                                                         Spacer(Modifier.width(10.dp))
-
                                                     }
                                                     Text(
                                                         text = "${book.bookCategory.name} • ${manager.getBookLocationLabel(book)}",
@@ -752,6 +755,26 @@ fun FurtherStudyView(
                                                     fontWeight = if (idx == selectedKeyIndex) FontWeight.Bold else FontWeight.Normal
                                                 )
                                             },
+                                            trailingIcon = {
+                                                IconButton(
+                                                    onClick = {
+                                                        if (selectedModule != null) {
+                                                            coroutineScope.launch {
+                                                                val secContent = manager.readKeyContent(selectedModule!!, k)
+                                                                ttsService.queueSection(
+                                                                    title = k.name,
+                                                                    subtitle = selectedModule?.name ?: "",
+                                                                    content = secContent,
+                                                                    player = audioPlayer
+                                                                )
+                                                            }
+                                                        }
+                                                    },
+                                                    modifier = Modifier.size(24.dp)
+                                                ) {
+                                                    Text("➕", fontSize = 11.sp)
+                                                }
+                                            },
                                             onClick = {
                                                 selectedKeyIndex = idx
                                                 sectionMenuExpanded = false
@@ -772,6 +795,32 @@ fun FurtherStudyView(
                                 modifier = Modifier.height(34.dp)
                             ) {
                                 Text("Next Section ▶", fontSize = 12.sp)
+                            }
+
+                            // Batch queue next 5 sections button (Requirement 4)
+                            if (genBookKeys.isNotEmpty()) {
+                                OutlinedButton(
+                                    onClick = {
+                                        if (selectedModule != null) {
+                                            coroutineScope.launch {
+                                                val nextKeys = genBookKeys.drop(selectedKeyIndex).take(5)
+                                                nextKeys.forEach { k ->
+                                                    val secContent = manager.readKeyContent(selectedModule!!, k)
+                                                    ttsService.queueSection(
+                                                        title = k.name,
+                                                        subtitle = selectedModule?.name ?: "",
+                                                        content = secContent,
+                                                        player = audioPlayer
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Text("➕ Queue Next 5", fontSize = 12.sp)
+                                }
                             }
 
                             Text(
@@ -872,362 +921,455 @@ fun FurtherStudyView(
             // Main Reader Content Area
             Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 if (selectedModule == null) {
-                // Empty state if no modules installed
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(32.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Card(
-                        modifier = Modifier.widthIn(max = 520.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(14.dp)
-                        ) {
-                            Text("📚", fontSize = 48.sp)
-                            Text(
-                                text = "No Sword Modules Selected",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Install Bibles, commentaries, dictionaries, or general books to begin further study.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Button(onClick = onOpenDownload) {
-                                Text("Open Downloader")
-                            }
-                        }
-                    }
-                }
-            } else if (isVerseBasedModule) {
-                // Verse-based Module Reading Surface (Supports Single or Parallel comparison)
-
-                // Loading state while moduleBooks is still being fetched
-                if (moduleBooks.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator()
-                    }
-                } else {
-                    val primaryPassage = remember(selectedModule, currentModuleBook, currentChapter) {
-                        if (currentModuleBook != null) {
-                            manager.readChapter(currentModuleBook, currentChapter, selectedModule)
-                        } else {
-                            ChapterPassage("", 0, emptyList(), "", error = "No book selected.")
-                        }
-                    }
-
-                    val secondaryPassage = if (isParallelMode && secondaryModule != null && currentModuleBook != null) {
-                        remember(secondaryModule, currentModuleBook, currentChapter) {
-                            manager.readChapter(currentModuleBook, currentChapter, secondaryModule)
-                        }
-                    } else null
-
-                    if (isParallelMode && secondaryPassage != null) {
-                        // Split / Parallel View: primary + secondary (+ optional notes)
-                        Row(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(16.dp),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp)
-                        ) {
-                            // Left Column: Primary Module
-                            val primaryTrackTitle = "${primaryPassage.bookName} ${primaryPassage.chapterNumber} (${selectedModule!!.initials})"
-                            val isPrimaryReading = audioPlayer.isTrackActive(primaryTrackTitle)
-                            val isPrimarySynthesizing = ttsService.isSynthesizing && ttsService.currentReadingTitle == primaryTrackTitle
-
-                            Card(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxHeight(),
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                            ) {
-                                PassageCardContent(
-                                    passage = primaryPassage,
-                                    book = selectedModule!!,
-                                    fontSizeSp = fontSizeSp,
-                                    selectedVerseFilter = selectedVerseFilter,
-                                    isReading = isPrimaryReading,
-                                    isSynthesizing = isPrimarySynthesizing,
-                                    onReadPassage = {
-                                        ttsService.readPassage(primaryPassage, selectedModule!!, audioPlayer)
-                                    },
-                                    onReadVerse = { vNum, vText ->
-                                        ttsService.readVerse(
-                                            reference = "${primaryPassage.bookName} ${primaryPassage.chapterNumber}:$vNum",
-                                            verseText = vText,
-                                            bookInitials = selectedModule!!.initials,
-                                            player = audioPlayer
-                                        )
-                                    },
-                                    onCopy = {
-                                        copyTextToClipboard(primaryPassage.fullText)
-                                        copyNotification = "Copied ${primaryPassage.bookName} ${primaryPassage.chapterNumber} to clipboard!"
-                                    }
-                                )
-                            }
-
-                            // Centre Column: Secondary Module
-                            val secondaryTrackTitle = "${secondaryPassage.bookName} ${secondaryPassage.chapterNumber} (${secondaryModule!!.initials})"
-                            val isSecondaryReading = audioPlayer.isTrackActive(secondaryTrackTitle)
-                            val isSecondarySynthesizing = ttsService.isSynthesizing && ttsService.currentReadingTitle == secondaryTrackTitle
-
-                            Card(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxHeight(),
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                            ) {
-                                PassageCardContent(
-                                    passage = secondaryPassage,
-                                    book = secondaryModule!!,
-                                    fontSizeSp = fontSizeSp,
-                                    selectedVerseFilter = selectedVerseFilter,
-                                    isReading = isSecondaryReading,
-                                    isSynthesizing = isSecondarySynthesizing,
-                                    onReadPassage = {
-                                        ttsService.readPassage(secondaryPassage, secondaryModule!!, audioPlayer)
-                                    },
-                                    onReadVerse = { vNum, vText ->
-                                        ttsService.readVerse(
-                                            reference = "${secondaryPassage.bookName} ${secondaryPassage.chapterNumber}:$vNum",
-                                            verseText = vText,
-                                            bookInitials = secondaryModule!!.initials,
-                                            player = audioPlayer
-                                        )
-                                    },
-                                    onCopy = {
-                                        copyTextToClipboard(secondaryPassage.fullText)
-                                        copyNotification = "Copied ${secondaryPassage.bookName} ${secondaryPassage.chapterNumber}  to clipboard!"
-                                    }
-                                )
-                            }
-
-                            // Right Column: Notes (if enabled)
-                            if (isNotesMode && selectedModule != null) {
-                                NotesPanel(
-                                    repository = notesRepository,
-                                    moduleKey = selectedModule!!.initials,
-                                    moduleDisplayName = selectedModule!!.name,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .fillMaxHeight()
-                                )
-                            }
-                        }
-                    } else {
-                        // Single Module view (+ optional notes column)
-                        Row(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(16.dp),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp)
-                        ) {
-                            val primaryTrackTitle = "${primaryPassage.bookName} ${primaryPassage.chapterNumber} (${selectedModule!!.initials})"
-                            val isPrimaryReading = audioPlayer.isTrackActive(primaryTrackTitle)
-                            val isPrimarySynthesizing = ttsService.isSynthesizing && ttsService.currentReadingTitle == primaryTrackTitle
-
-                            Card(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxHeight(),
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                            ) {
-                                PassageCardContent(
-                                    passage = primaryPassage,
-                                    book = selectedModule!!,
-                                    fontSizeSp = fontSizeSp,
-                                    selectedVerseFilter = selectedVerseFilter,
-                                    isReading = isPrimaryReading,
-                                    isSynthesizing = isPrimarySynthesizing,
-                                    onReadPassage = {
-                                        ttsService.readPassage(primaryPassage, selectedModule!!, audioPlayer)
-                                    },
-                                    onReadVerse = { vNum, vText ->
-                                        ttsService.readVerse(
-                                            reference = "${primaryPassage.bookName} ${primaryPassage.chapterNumber}:$vNum",
-                                            verseText = vText,
-                                            bookInitials = selectedModule!!.initials,
-                                            player = audioPlayer
-                                        )
-                                    },
-                                    onCopy = {
-                                        copyTextToClipboard(primaryPassage.fullText)
-                                        copyNotification = "Copied ${primaryPassage.bookName} ${primaryPassage.chapterNumber} to clipboard!"
-                                    }
-                                )
-                            }
-
-                            // Notes column (if enabled)
-                            if (isNotesMode && selectedModule != null) {
-                                NotesPanel(
-                                    repository = notesRepository,
-                                    moduleKey = selectedModule!!.initials,
-                                    moduleDisplayName = selectedModule!!.name,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .fillMaxHeight()
-                                )
-                            }
-                        }
-                    }
-                }
-            } else {
-                // General Book / Dictionary Reading Surface
-                val activeKey = genBookKeys.getOrNull(selectedKeyIndex)
-                val keyContent = remember(selectedModule, activeKey) {
-                    if (selectedModule != null && activeKey != null) {
-                        manager.readKeyContent(selectedModule!!, activeKey)
-                    } else {
-                        "No content available for this selection."
-                    }
-                }
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Card(
+                    // Empty state if no modules installed
+                    Box(
                         modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight(),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                            .fillMaxSize()
+                            .padding(32.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(20.dp)
+                        Card(
+                            modifier = Modifier.widthIn(max = 520.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
                         ) {
-                            // Header
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                            Column(
+                                modifier = Modifier.padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(14.dp)
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = activeKey?.name ?: "Section Content",
-                                        style = MaterialTheme.typography.headlineSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                    Text(
-                                        text = "${selectedModule?.name}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
+                                Text("📚", fontSize = 48.sp)
+                                Text(
+                                    text = "No Sword Modules Selected",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Install Bibles, commentaries, dictionaries, or general books to begin further study.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Button(onClick = onOpenDownload) {
+                                    Text("Open Downloader")
                                 }
+                            }
+                        }
+                    }
+                } else if (isVerseBasedModule) {
+                    // Verse-based Module Reading Surface (Supports Single or Parallel comparison)
 
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    // Loading state while moduleBooks is still being fetched
+                    if (moduleBooks.isEmpty()) {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator()
+                        }
+                    } else {
+                        val primaryPassage = remember(selectedModule, currentModuleBook, currentChapter) {
+                            if (currentModuleBook != null) {
+                                manager.readChapter(currentModuleBook, currentChapter, selectedModule)
+                            } else {
+                                ChapterPassage("", 0, emptyList(), "", error = "No book selected.")
+                            }
+                        }
+
+                        val secondaryPassage = if (isParallelMode && secondaryModule != null && currentModuleBook != null) {
+                            remember(secondaryModule, currentModuleBook, currentChapter) {
+                                manager.readChapter(currentModuleBook, currentChapter, secondaryModule)
+                            }
+                        } else null
+
+                        if (isParallelMode && secondaryPassage != null) {
+                            // Split / Parallel View: primary + secondary (+ optional notes)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(16.dp),
+                                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                // Left Column: Primary Module
+                                val primaryTrackTitle = "${primaryPassage.bookName} ${primaryPassage.chapterNumber} (${selectedModule!!.initials})"
+                                val isPrimaryReading = audioPlayer.isTrackActive(primaryTrackTitle)
+                                val isPrimarySynthesizing = ttsService.isSynthesizing && ttsService.currentReadingTitle == primaryTrackTitle
+                                val isPrimaryQueued = audioPlayer.isTrackQueued(primaryTrackTitle)
+
+                                Card(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight(),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
                                 ) {
-                                    val sectionTitle = if (!selectedModule?.name.isNullOrBlank()) "${activeKey?.name ?: "Section"} • ${selectedModule?.name}" else activeKey?.name ?: "Section"
-                                    val isSectionReading = audioPlayer.isTrackActive(sectionTitle)
-                                    val isSectionSynthesizing = ttsService.isSynthesizing && ttsService.currentReadingTitle == sectionTitle
-
-                                    FilledTonalButton(
-                                        onClick = {
-                                            ttsService.readSection(
-                                                title = activeKey?.name ?: "Section",
-                                                subtitle = selectedModule?.name ?: "",
-                                                content = keyContent,
+                                    PassageCardContent(
+                                        passage = primaryPassage,
+                                        book = selectedModule!!,
+                                        fontSizeSp = fontSizeSp,
+                                        selectedVerseFilter = selectedVerseFilter,
+                                        isReading = isPrimaryReading,
+                                        isSynthesizing = isPrimarySynthesizing,
+                                        isQueued = isPrimaryQueued,
+                                        onReadPassage = {
+                                            ttsService.readPassage(primaryPassage, selectedModule!!, audioPlayer)
+                                        },
+                                        onQueuePassage = {
+                                            ttsService.queuePassage(primaryPassage, selectedModule!!, audioPlayer)
+                                        },
+                                        onSavePassageAudio = {
+                                            val safeName = "${primaryPassage.bookName}_${primaryPassage.chapterNumber}_${selectedModule!!.initials}"
+                                            TtsFileUtils.openSaveAudioFileDialog(defaultFilename = safeName) { destFile ->
+                                                coroutineScope.launch {
+                                                    val speechText = TtsTextCleaner.formatPassageForSpeech(
+                                                        primaryPassage.bookName,
+                                                        primaryPassage.chapterNumber,
+                                                        primaryPassage.fullText
+                                                    )
+                                                    ttsService.synthesizeToFile(speechText, primaryTrackTitle, destFile)
+                                                }
+                                            }
+                                        },
+                                        onReadVerse = { vNum, vText ->
+                                            ttsService.readVerse(
+                                                reference = "${primaryPassage.bookName} ${primaryPassage.chapterNumber}:$vNum",
+                                                verseText = vText,
+                                                bookInitials = selectedModule!!.initials,
                                                 player = audioPlayer
                                             )
                                         },
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                        modifier = Modifier.height(32.dp)
-                                    ) {
-                                        if (isSectionSynthesizing) {
-                                            CircularProgressIndicator(
-                                                modifier = Modifier.size(13.dp),
-                                                strokeWidth = 2.dp,
-                                                color = MaterialTheme.colorScheme.primary
-                                            )
-                                            Spacer(Modifier.width(6.dp))
-                                            Text("Loading...", fontSize = 12.sp)
-                                        } else if (isSectionReading) {
-                                            Text("⏹ Stop Audio", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                        } else {
-                                            Text("🔊 Read Section", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                        onCopy = {
+                                            copyTextToClipboard(primaryPassage.fullText)
+                                            copyNotification = "Copied ${primaryPassage.bookName} ${primaryPassage.chapterNumber} to clipboard!"
                                         }
-                                    }
+                                    )
+                                }
 
-                                    OutlinedButton(
-                                        onClick = {
-                                            copyTextToClipboard(keyContent)
-                                            copyNotification = "Copied ${activeKey?.name} to clipboard!"
+                                // Centre Column: Secondary Module
+                                val secondaryTrackTitle = "${secondaryPassage.bookName} ${secondaryPassage.chapterNumber} (${secondaryModule!!.initials})"
+                                val isSecondaryReading = audioPlayer.isTrackActive(secondaryTrackTitle)
+                                val isSecondarySynthesizing = ttsService.isSynthesizing && ttsService.currentReadingTitle == secondaryTrackTitle
+                                val isSecondaryQueued = audioPlayer.isTrackQueued(secondaryTrackTitle)
+
+                                Card(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight(),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                                ) {
+                                    PassageCardContent(
+                                        passage = secondaryPassage,
+                                        book = secondaryModule!!,
+                                        fontSizeSp = fontSizeSp,
+                                        selectedVerseFilter = selectedVerseFilter,
+                                        isReading = isSecondaryReading,
+                                        isSynthesizing = isSecondarySynthesizing,
+                                        isQueued = isSecondaryQueued,
+                                        onReadPassage = {
+                                            ttsService.readPassage(secondaryPassage, secondaryModule!!, audioPlayer)
                                         },
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                        modifier = Modifier.height(32.dp)
-                                    ) {
-                                        Text("📋 Copy", fontSize = 12.sp)
-                                    }
+                                        onQueuePassage = {
+                                            ttsService.queuePassage(secondaryPassage, secondaryModule!!, audioPlayer)
+                                        },
+                                        onSavePassageAudio = {
+                                            val safeName = "${secondaryPassage.bookName}_${secondaryPassage.chapterNumber}_${secondaryModule!!.initials}"
+                                            TtsFileUtils.openSaveAudioFileDialog(defaultFilename = safeName) { destFile ->
+                                                coroutineScope.launch {
+                                                    val speechText = TtsTextCleaner.formatPassageForSpeech(
+                                                        secondaryPassage.bookName,
+                                                        secondaryPassage.chapterNumber,
+                                                        secondaryPassage.fullText
+                                                    )
+                                                    ttsService.synthesizeToFile(speechText, secondaryTrackTitle, destFile)
+                                                }
+                                            }
+                                        },
+                                        onReadVerse = { vNum, vText ->
+                                            ttsService.readVerse(
+                                                reference = "${secondaryPassage.bookName} ${secondaryPassage.chapterNumber}:$vNum",
+                                                verseText = vText,
+                                                bookInitials = secondaryModule!!.initials,
+                                                player = audioPlayer
+                                            )
+                                        },
+                                        onCopy = {
+                                            copyTextToClipboard(secondaryPassage.fullText)
+                                            copyNotification = "Copied ${secondaryPassage.bookName} ${secondaryPassage.chapterNumber}  to clipboard!"
+                                        }
+                                    )
+                                }
+
+                                // Right Column: Notes (if enabled)
+                                if (isNotesMode && selectedModule != null) {
+                                    NotesPanel(
+                                        repository = notesRepository,
+                                        moduleKey = selectedModule!!.initials,
+                                        moduleDisplayName = selectedModule!!.name,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                    )
                                 }
                             }
-
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-
-                            // Text content
-                            Box(
+                        } else {
+                            // Single Module view (+ optional notes column)
+                            Row(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .verticalScroll(rememberScrollState())
+                                    .padding(16.dp),
+                                horizontalArrangement = Arrangement.spacedBy(16.dp)
                             ) {
-                                Text(
-                                    text = keyContent,
-                                    fontSize = fontSizeSp.sp,
-                                    lineHeight = (fontSizeSp + 8).sp,
-                                    modifier = Modifier.padding(bottom = 32.dp)
-                                )
+                                val primaryTrackTitle = "${primaryPassage.bookName} ${primaryPassage.chapterNumber} (${selectedModule!!.initials})"
+                                val isPrimaryReading = audioPlayer.isTrackActive(primaryTrackTitle)
+                                val isPrimarySynthesizing = ttsService.isSynthesizing && ttsService.currentReadingTitle == primaryTrackTitle
+                                val isPrimaryQueued = audioPlayer.isTrackQueued(primaryTrackTitle)
+
+                                Card(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight(),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                                ) {
+                                    PassageCardContent(
+                                        passage = primaryPassage,
+                                        book = selectedModule!!,
+                                        fontSizeSp = fontSizeSp,
+                                        selectedVerseFilter = selectedVerseFilter,
+                                        isReading = isPrimaryReading,
+                                        isSynthesizing = isPrimarySynthesizing,
+                                        isQueued = isPrimaryQueued,
+                                        onReadPassage = {
+                                            ttsService.readPassage(primaryPassage, selectedModule!!, audioPlayer)
+                                        },
+                                        onQueuePassage = {
+                                            ttsService.queuePassage(primaryPassage, selectedModule!!, audioPlayer)
+                                        },
+                                        onSavePassageAudio = {
+                                            val safeName = "${primaryPassage.bookName}_${primaryPassage.chapterNumber}_${selectedModule!!.initials}"
+                                            TtsFileUtils.openSaveAudioFileDialog(defaultFilename = safeName) { destFile ->
+                                                coroutineScope.launch {
+                                                    val speechText = TtsTextCleaner.formatPassageForSpeech(
+                                                        primaryPassage.bookName,
+                                                        primaryPassage.chapterNumber,
+                                                        primaryPassage.fullText
+                                                    )
+                                                    ttsService.synthesizeToFile(speechText, primaryTrackTitle, destFile)
+                                                }
+                                            }
+                                        },
+                                        onReadVerse = { vNum, vText ->
+                                            ttsService.readVerse(
+                                                reference = "${primaryPassage.bookName} ${primaryPassage.chapterNumber}:$vNum",
+                                                verseText = vText,
+                                                bookInitials = selectedModule!!.initials,
+                                                player = audioPlayer
+                                            )
+                                        },
+                                        onCopy = {
+                                            copyTextToClipboard(primaryPassage.fullText)
+                                            copyNotification = "Copied ${primaryPassage.bookName} ${primaryPassage.chapterNumber} to clipboard!"
+                                        }
+                                    )
+                                }
+
+                                // Notes column (if enabled)
+                                if (isNotesMode && selectedModule != null) {
+                                    NotesPanel(
+                                        repository = notesRepository,
+                                        moduleKey = selectedModule!!.initials,
+                                        moduleDisplayName = selectedModule!!.name,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                    )
+                                }
                             }
                         }
                     }
+                } else {
+                    // General Book / Dictionary Reading Surface
+                    val activeKey = genBookKeys.getOrNull(selectedKeyIndex)
+                    val keyContent = remember(selectedModule, activeKey) {
+                        if (selectedModule != null && activeKey != null) {
+                            manager.readKeyContent(selectedModule!!, activeKey)
+                        } else {
+                            "No content available for this selection."
+                        }
+                    }
 
-                    // Notes column for general book / dictionary view
-                    if (isNotesMode && selectedModule != null) {
-                        NotesPanel(
-                            repository = notesRepository,
-                            moduleKey = selectedModule!!.initials,
-                            moduleDisplayName = selectedModule!!.name,
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Card(
                             modifier = Modifier
                                 .weight(1f)
-                                .fillMaxHeight()
-                        )
+                                .fillMaxHeight(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(20.dp)
+                            ) {
+                                // Header
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = activeKey?.name ?: "Section Content",
+                                            style = MaterialTheme.typography.headlineSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Text(
+                                            text = "${selectedModule?.name}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        val sectionTitle = if (!selectedModule?.name.isNullOrBlank()) "${activeKey?.name ?: "Section"} • ${selectedModule?.name}" else activeKey?.name ?: "Section"
+                                        val isSectionReading = audioPlayer.isTrackActive(sectionTitle)
+                                        val isSectionSynthesizing = ttsService.isSynthesizing && ttsService.currentReadingTitle == sectionTitle
+                                        val isSectionQueued = audioPlayer.isTrackQueued(sectionTitle)
+
+                                        FilledTonalButton(
+                                            onClick = {
+                                                ttsService.readSection(
+                                                    title = activeKey?.name ?: "Section",
+                                                    subtitle = selectedModule?.name ?: "",
+                                                    content = keyContent,
+                                                    player = audioPlayer
+                                                )
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(32.dp)
+                                        ) {
+                                            if (isSectionSynthesizing) {
+                                                CircularProgressIndicator(
+                                                    modifier = Modifier.size(13.dp),
+                                                    strokeWidth = 2.dp,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                                Spacer(Modifier.width(6.dp))
+                                                Text("Loading...", fontSize = 12.sp)
+                                            } else if (isSectionReading) {
+                                                Text("⏹ Stop Audio", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                            } else {
+                                                Text("🔊 Read Section", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                            }
+                                        }
+
+                                        // Queue Section button (Requirement 4)
+                                        OutlinedButton(
+                                            onClick = {
+                                                ttsService.queueSection(
+                                                    title = activeKey?.name ?: "Section",
+                                                    subtitle = selectedModule?.name ?: "",
+                                                    content = keyContent,
+                                                    player = audioPlayer
+                                                )
+                                            },
+                                            enabled = !isSectionQueued,
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(32.dp)
+                                        ) {
+                                            Text(if (isSectionQueued) "✓ Queued" else "➕ Queue Section", fontSize = 12.sp)
+                                        }
+
+                                        // Save Audio to File button (Requirement 3)
+                                        OutlinedButton(
+                                            onClick = {
+                                                val safeName = sectionTitle.replace(Regex("[^a-zA-Z0-9.-]"), "_")
+                                                TtsFileUtils.openSaveAudioFileDialog(defaultFilename = safeName) { destFile ->
+                                                    coroutineScope.launch {
+                                                        val speechText = TtsTextCleaner.formatSectionForSpeech(
+                                                            title = activeKey?.name ?: "Section",
+                                                            subtitle = selectedModule?.name ?: "",
+                                                            text = keyContent
+                                                        )
+                                                        ttsService.synthesizeToFile(speechText, sectionTitle, destFile)
+                                                    }
+                                                }
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(32.dp)
+                                        ) {
+                                            Text("💾 Save Audio", fontSize = 12.sp)
+                                        }
+
+                                        OutlinedButton(
+                                            onClick = {
+                                                copyTextToClipboard(keyContent)
+                                                copyNotification = "Copied ${activeKey?.name} to clipboard!"
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(32.dp)
+                                        ) {
+                                            Text("📋 Copy", fontSize = 12.sp)
+                                        }
+                                    }
+                                }
+
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
+                                // Text content
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .verticalScroll(rememberScrollState())
+                                ) {
+                                    Text(
+                                        text = keyContent,
+                                        fontSize = fontSizeSp.sp,
+                                        lineHeight = (fontSizeSp + 8).sp,
+                                        modifier = Modifier.padding(bottom = 32.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Notes column for general book / dictionary view
+                        if (isNotesMode && selectedModule != null) {
+                            NotesPanel(
+                                repository = notesRepository,
+                                moduleKey = selectedModule!!.initials,
+                                moduleDisplayName = selectedModule!!.name,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxHeight()
+                            )
+                        }
                     }
                 }
             }
         }
     }
 
-        // Module Info Dialog
-        if (showModuleInfoDialog && selectedModule != null) {
-            ModuleInfoDialog(
-                book = selectedModule!!,
-                manager = manager,
-                onDismiss = { showModuleInfoDialog = false }
-            )
-        }
+    // Module Info Dialog
+    if (showModuleInfoDialog && selectedModule != null) {
+        ModuleInfoDialog(
+            book = selectedModule!!,
+            manager = manager,
+            onDismiss = { showModuleInfoDialog = false }
+        )
+    }
 
-        // Import Book Dialog
-        if (importingFile != null) {
-            ImportBookDialog(
-                selectedFile = importingFile!!,
-                manager = manager,
-                onDismiss = { importingFile = null },
-                onImportSuccess = { book ->
-                    selectedModule = book
-                    categoryTab = ModuleCategoryTab.GENERAL_BOOKS
-                }
-            )
-        }
+    // Import Book Dialog
+    if (!importingFiles.isNullOrEmpty()) {
+        ImportBookDialog(
+            selectedFiles = importingFiles!!,
+            manager = manager,
+            onDismiss = { importingFiles = null },
+            onImportSuccess = { book ->
+                selectedModule = book
+                categoryTab = ModuleCategoryTab.GENERAL_BOOKS
+            }
+        )
     }
 }
 
@@ -1239,7 +1381,10 @@ private fun PassageCardContent(
     selectedVerseFilter: Int,
     isReading: Boolean = false,
     isSynthesizing: Boolean = false,
+    isQueued: Boolean = false,
     onReadPassage: () -> Unit = {},
+    onQueuePassage: (() -> Unit)? = null,
+    onSavePassageAudio: (() -> Unit)? = null,
     onReadVerse: (verseNumber: Int, text: String) -> Unit = { _, _ -> },
     onCopy: () -> Unit
 ) {
@@ -1289,6 +1434,27 @@ private fun PassageCardContent(
                         Text("⏹ Stop Audio", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     } else {
                         Text("🔊 Read Chapter", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    }
+                }
+
+                if (onQueuePassage != null) {
+                    OutlinedButton(
+                        onClick = onQueuePassage,
+                        enabled = !isQueued,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Text(if (isQueued) "✓ Queued" else "➕ Queue", fontSize = 12.sp)
+                    }
+                }
+
+                if (onSavePassageAudio != null) {
+                    OutlinedButton(
+                        onClick = onSavePassageAudio,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Text("💾 Save", fontSize = 12.sp)
                     }
                 }
 

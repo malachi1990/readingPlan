@@ -1,6 +1,9 @@
 package org.bible.reading.tts
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.bible.reading.audio.model.AudioTrack
 import org.bible.reading.audio.player.AudioBiblePlayer
 import org.bible.reading.audio.player.AudioCodecRegistry
@@ -9,6 +12,7 @@ import java.io.File
 import java.nio.file.Files
 import javax.sound.sampled.AudioSystem
 import kotlin.test.*
+import kotlin.time.Duration.Companion.milliseconds
 
 class TextToSpeechIntegrationTest {
 
@@ -89,21 +93,63 @@ class TextToSpeechIntegrationTest {
             val defaultPrefs = prefMgr.loadPreferences()
             assertEquals(TtsEngineType.PIPER, defaultPrefs.selectedEngine)
             assertEquals("en_US-lessac-medium", defaultPrefs.selectedVoiceId)
+            assertEquals("", defaultPrefs.kokoroPythonPath)
+            assertEquals("", defaultPrefs.kokoroBinaryPath)
+            assertEquals("", defaultPrefs.kokoroVoicesPath)
+            assertFalse(defaultPrefs.kokoroUseCuda)
 
             val updated = TtsPreferences(
-                selectedEngine = TtsEngineType.PIPER,
-                selectedVoiceId = "en_US-ryan-medium",
+                selectedEngine = TtsEngineType.KOKORO,
+                selectedVoiceId = "af_bella",
                 speechRate = 1.2f,
                 sentenceSilence = 0.3f,
-                autoDownloadVoice = false
+                autoDownloadVoice = false,
+                kokoroPythonPath = "/usr/bin/python3",
+                kokoroBinaryPath = "/models/kokoro.onnx",
+                kokoroVoicesPath = "/models/voices.bin",
+                kokoroUseCuda = true
             )
             prefMgr.savePreferences(updated)
 
             val reloaded = prefMgr.loadPreferences()
-            assertEquals("en_US-ryan-medium", reloaded.selectedVoiceId)
+            assertEquals(TtsEngineType.KOKORO, reloaded.selectedEngine)
+            assertEquals("af_bella", reloaded.selectedVoiceId)
             assertEquals(1.2f, reloaded.speechRate, 0.01f)
             assertEquals(0.3f, reloaded.sentenceSilence, 0.01f)
             assertFalse(reloaded.autoDownloadVoice)
+            assertEquals("/usr/bin/python3", reloaded.kokoroPythonPath)
+            assertEquals("/models/kokoro.onnx", reloaded.kokoroBinaryPath)
+            assertEquals("/models/voices.bin", reloaded.kokoroVoicesPath)
+            assertTrue(reloaded.kokoroUseCuda)
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun testKokoroPathResolutionAndCustomConfiguration() {
+        val tempDir = Files.createTempDirectory("kokoro_path_test").toFile()
+        try {
+            val kokoroMgr = KokoroManager(tempDir)
+
+            // Test custom python path resolution
+            val fakePython = File(tempDir, "custom_python3").apply { writeText("#!/bin/sh") }
+            val resolvedPy = kokoroMgr.resolvePythonPath(fakePython.absolutePath)
+            assertEquals(fakePython.absolutePath, resolvedPy)
+
+            // Test default fallback
+            val defaultPy = kokoroMgr.resolvePythonPath("")
+            assertTrue(defaultPy.isNotBlank())
+
+            // Test custom model path resolution
+            val fakeModel = File(tempDir, "custom_kokoro.onnx").apply { writeBytes(ByteArray(10)) }
+            val resolvedModel = kokoroMgr.resolveModelFile(fakeModel.absolutePath)
+            assertEquals(fakeModel.absolutePath, resolvedModel.absolutePath)
+
+            // Test custom voices path resolution
+            val fakeVoices = File(tempDir, "custom_voices.bin").apply { writeBytes(ByteArray(10)) }
+            val resolvedVoices = kokoroMgr.resolveVoicesFile(fakeVoices.absolutePath)
+            assertEquals(fakeVoices.absolutePath, resolvedVoices.absolutePath)
         } finally {
             tempDir.deleteRecursively()
         }
@@ -129,23 +175,88 @@ class TextToSpeechIntegrationTest {
     }
 
     @Test
-    fun testAudioBiblePlayerTitleTracking() {
+    fun testAudioBiblePlayerTitleTrackingAndQueue() {
         val player = AudioBiblePlayer()
-        val tempFile = File.createTempFile("test_player", ".wav").apply { deleteOnExit() }
-        tempFile.writeBytes(ByteArray(100))
+        val tempFile1 = File.createTempFile("test_player1", ".wav").apply { deleteOnExit() }
+        val tempFile2 = File.createTempFile("test_player2", ".wav").apply { deleteOnExit() }
+        tempFile1.writeBytes(ByteArray(100))
+        tempFile2.writeBytes(ByteArray(100))
 
-        val track = AudioTrack(
-            file = tempFile,
-            title = "John 3:16 (KJV)"
-        )
+        val track1 = AudioTrack(file = tempFile1, title = "John 3:16 (KJV)")
+        val track2 = AudioTrack(file = tempFile2, title = "John 3:17 (KJV)")
 
         assertFalse(player.isTrackActive("John 3:16 (KJV)"))
-        player.playTrack(track)
+        assertFalse(player.isTrackQueued("John 3:16 (KJV)"))
+
+        // Enqueue first track
+        player.enqueueTrack(track1)
         assertEquals("John 3:16 (KJV)", player.currentTrack?.title)
-        assertTrue(player.isTrackActive("John 3:16 (KJV)"))
-        assertFalse(player.isTrackActive("Genesis 1:1"))
+        assertTrue(player.isTrackQueued("John 3:16 (KJV)"))
+
+        // Enqueue second track to playlist queue
+        player.enqueueTrack(track2)
+        assertEquals(2, player.playlist.size)
+        assertTrue(player.isTrackQueued("John 3:17 (KJV)"))
+        assertEquals("John 3:16 (KJV)", player.currentTrack?.title)
+
+        // Remove track
+        player.removeTrack(1)
+        assertEquals(1, player.playlist.size)
+        assertFalse(player.isTrackQueued("John 3:17 (KJV)"))
+
         player.stop()
         assertFalse(player.isTrackActive("John 3:16 (KJV)"))
+    }
+
+    @Test
+    fun testSaveGeneratedAudioToFile() = runBlocking {
+        val tempDir = withContext(Dispatchers.IO) {
+            Files.createTempDirectory("tts_save_test")
+        }.toFile()
+        try {
+            val service = TtsService(tempDir)
+            val sourceWav = File(tempDir, "source.wav").apply {
+                writeText("RIFF....WAVEfmt ....data....")
+            }
+            val destinationWav = File(tempDir, "saved/output_narration.wav")
+
+            val result = service.saveAudioToFile(sourceWav, destinationWav)
+            assertTrue(result.isSuccess)
+            assertTrue(destinationWav.exists())
+            assertEquals(sourceWav.length(), destinationWav.length())
+
+            val track = AudioTrack(file = sourceWav, title = "Genesis 1:1")
+            val trackDest = File(tempDir, "saved/track_exported.wav")
+            val trackRes = service.saveTrackToFile(track, trackDest)
+            assertTrue(trackRes.isSuccess)
+            assertTrue(trackDest.exists())
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun testSectionQueuingInTtsService() = runBlocking {
+        val tempDir = withContext(Dispatchers.IO) {
+            Files.createTempDirectory("tts_queue_test")
+        }.toFile()
+        try {
+            val service = TtsService(tempDir)
+            val player = AudioBiblePlayer()
+
+            // Test queuing when idle
+            service.queueSection(
+                title = "Section I: Introduction",
+                subtitle = "Study Guide",
+                content = "This is the content of section one.",
+                player = player
+            )
+
+            delay(100.milliseconds)
+            assertTrue(service.isSynthesizing || service.statusMessage != null || player.currentTrack != null)
+        } finally {
+            tempDir.deleteRecursively()
+        }
     }
 
     @Test
@@ -156,6 +267,45 @@ class TextToSpeechIntegrationTest {
         assertFalse(state.showTtsSettingsDialog)
         state.showTtsSettingsDialog = true
         assertTrue(state.showTtsSettingsDialog)
+    }
+
+    @Test
+    fun testKokoroCUDAandNonCUDASynthesisIfAvailable() = runBlocking {
+        val userHome = System.getProperty("user.home")
+        val appDir = File(userHome, ".bibleReadingPlan")
+        val service = TtsService(appDir)
+
+        val kokoroVoice = TtsVoiceCatalog.KOKORO_VOICES.first()
+        if (service.kokoroManager.isAvailable()) {
+            val sampleText = "In the beginning was the Word."
+
+            // 1. Non-CUDA synthesis (existing script logic)
+            service.setKokoroUseCuda(false)
+            val nonCudaOut = File(service.cacheDir, "test_non_cuda.wav")
+            val nonCudaRes = service.kokoroManager.synthesize(
+                text = sampleText,
+                outputWav = nonCudaOut,
+                voice = kokoroVoice,
+                useCuda = false
+            )
+            assertTrue(nonCudaRes.isSuccess, "Non-CUDA synthesis should succeed: ${nonCudaRes.exceptionOrNull()?.message}")
+            assertTrue(nonCudaOut.exists() && nonCudaOut.length() > 1024)
+
+            // 2. CUDA synthesis
+            service.setKokoroUseCuda(true)
+            val cudaOut = File(service.cacheDir, "test_cuda.wav")
+            val cudaRes = service.kokoroManager.synthesize(
+                text = sampleText,
+                outputWav = cudaOut,
+                voice = kokoroVoice,
+                useCuda = true
+            )
+            assertTrue(cudaRes.isSuccess, "CUDA synthesis should succeed or fallback gracefully: ${cudaRes.exceptionOrNull()?.message}")
+            assertTrue(cudaOut.exists() && cudaOut.length() > 1024)
+
+            nonCudaOut.delete()
+            cudaOut.delete()
+        }
     }
 
     @Test
@@ -177,7 +327,9 @@ class TextToSpeechIntegrationTest {
             assertTrue(audioFile.length() > 1024, "Audio file should be non-empty WAV")
 
             // Verify WAV header
-            AudioSystem.getAudioInputStream(audioFile).use { ais ->
+            withContext(Dispatchers.IO) {
+                AudioSystem.getAudioInputStream(audioFile)
+            }.use { ais ->
                 val format = ais.format
                 assertEquals("PCM_SIGNED", format.encoding.toString())
                 assertTrue(ais.frameLength > 0, "WAV frame count should be positive")

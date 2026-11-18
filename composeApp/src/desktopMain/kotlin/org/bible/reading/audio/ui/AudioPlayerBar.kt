@@ -1,5 +1,6 @@
 package org.bible.reading.audio.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -11,6 +12,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.bible.reading.audio.player.AudioBiblePlayer
+import org.bible.reading.tts.ui.TtsFileUtils
 
 @Composable
 fun AudioPlayerBar(
@@ -22,6 +24,8 @@ fun AudioPlayerBar(
 ) {
     val track = player.currentTrack
     if (track == null && !isSynthesizing) return
+
+    var showPlaylistMenu by remember { mutableStateOf(false) }
 
     Surface(
         modifier = modifier
@@ -91,33 +95,91 @@ fun AudioPlayerBar(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f, fill = false)
                     ) {
                         Text("🎧", fontSize = 16.sp)
                         Text(
                             text = track.title,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1
                         )
                         if (player.playlist.size > 1) {
-                            Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = MaterialTheme.colorScheme.secondaryContainer
-                            ) {
-                                Text(
-                                    text = "${player.currentTrackIndex + 1} of ${player.playlist.size}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                                )
+                            Box {
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    modifier = Modifier.clickable { showPlaylistMenu = true }
+                                ) {
+                                    Text(
+                                        text = "📋 ${player.currentTrackIndex + 1} of ${player.playlist.size} ▼",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                    )
+                                }
+                                DropdownMenu(
+                                    expanded = showPlaylistMenu,
+                                    onDismissRequest = { showPlaylistMenu = false }
+                                ) {
+                                    Text(
+                                        text = "Playlist Queue (${player.playlist.size} tracks)",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                    )
+                                    HorizontalDivider()
+                                    player.playlist.forEachIndexed { idx, t ->
+                                        val isCurrent = idx == player.currentTrackIndex
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                ) {
+                                                    Text(if (isCurrent) "▶" else "•", fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal)
+                                                    Text(
+                                                        text = t.title,
+                                                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                                                        maxLines = 1
+                                                    )
+                                                }
+                                            },
+                                            trailingIcon = {
+                                                IconButton(
+                                                    onClick = { player.removeTrack(idx) },
+                                                    modifier = Modifier.size(20.dp)
+                                                ) {
+                                                    Text("✕", fontSize = 10.sp)
+                                                }
+                                            },
+                                            onClick = {
+                                                if (idx != player.currentTrackIndex) {
+                                                    player.playTracks(player.playlist.toList(), idx)
+                                                }
+                                                showPlaylistMenu = false
+                                            }
+                                        )
+                                    }
+                                    HorizontalDivider()
+                                    DropdownMenuItem(
+                                        text = { Text("Clear Queue", color = MaterialTheme.colorScheme.error) },
+                                        onClick = {
+                                            player.clearPlaylist()
+                                            showPlaylistMenu = false
+                                        }
+                                    )
+                                }
                             }
                         }
                         val subtitleText = if (track.subtitle.isNotBlank()) track.subtitle else "(${track.file.name})"
                         Text(
                             text = subtitleText,
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1
                         )
                     }
 
@@ -129,6 +191,24 @@ fun AudioPlayerBar(
                                 color = MaterialTheme.colorScheme.error,
                                 maxLines = 1
                             )
+                        }
+
+                        // Save audio file button (Requirement 3)
+                        OutlinedButton(
+                            onClick = {
+                                val safeName = track.title.replace(Regex("[^a-zA-Z0-9.-]"), "_")
+                                TtsFileUtils.openSaveAudioFileDialog(defaultFilename = safeName) { destFile ->
+                                    try {
+                                        track.file.copyTo(destFile, overwrite = true)
+                                    } catch (e: Exception) {
+                                        println("Failed to save audio: ${e.message}")
+                                    }
+                                }
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            modifier = Modifier.height(28.dp)
+                        ) {
+                            Text("💾 Save Audio", fontSize = 11.sp)
                         }
 
                         // Dismiss button

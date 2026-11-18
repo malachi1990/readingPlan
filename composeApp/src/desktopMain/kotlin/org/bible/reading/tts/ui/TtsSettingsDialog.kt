@@ -1,7 +1,6 @@
 package org.bible.reading.tts.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -36,8 +35,8 @@ fun TtsSettingsDialog(
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier
-                .widthIn(min = 550.dp, max = 680.dp)
-                .heightIn(min = 500.dp, max = 660.dp)
+                .widthIn(min = 600.dp, max = 760.dp)
+                .heightIn(min = 550.dp, max = 760.dp)
                 .clip(RoundedCornerShape(16.dp)),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 8.dp
@@ -239,6 +238,17 @@ private fun VoicesTabContent(
                     style = MaterialTheme.typography.labelSmall,
                     color = if (ttsService.piperManager.isBinaryInstalled()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            } else if (currentEngine == TtsEngineType.KOKORO) {
+                val kokoroAvailable = ttsService.kokoroManager.isAvailable(
+                    prefs.kokoroPythonPath,
+                    prefs.kokoroBinaryPath,
+                    prefs.kokoroVoicesPath
+                )
+                Text(
+                    text = if (kokoroAvailable) "Kokoro: Ready ✓" else "Kokoro: Path configuration needed",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (kokoroAvailable) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                )
             }
         }
 
@@ -253,6 +263,13 @@ private fun VoicesTabContent(
                 .weight(1f),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            if (currentEngine == TtsEngineType.KOKORO) {
+                item {
+                    KokoroConfigurationCard(ttsService)
+                    Spacer(Modifier.height(6.dp))
+                }
+            }
+
             items(voices) { voice ->
                 VoiceItemCard(
                     voice = voice,
@@ -273,6 +290,219 @@ private fun VoicesTabContent(
                         ttsService.testVoice(voice, player)
                     }
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun KokoroConfigurationCard(ttsService: TtsService) {
+    val prefs = ttsService.preferences
+    val kokoroMgr = ttsService.kokoroManager
+
+    val resolvedPython = remember(prefs.kokoroPythonPath) { kokoroMgr.resolvePythonPath(prefs.kokoroPythonPath) }
+    val resolvedModel = remember(prefs.kokoroBinaryPath) { kokoroMgr.resolveModelFile(prefs.kokoroBinaryPath) }
+    val resolvedVoices = remember(prefs.kokoroVoicesPath) { kokoroMgr.resolveVoicesFile(prefs.kokoroVoicesPath) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Kokoro Settings & CUDA Acceleration",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+
+                TextButton(
+                    onClick = {
+                        ttsService.setKokoroPythonPath("")
+                        ttsService.setKokoroBinaryPath("")
+                        ttsService.setKokoroVoicesPath("")
+                    },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    modifier = Modifier.height(28.dp)
+                ) {
+                    Text("Reset Paths", fontSize = 11.sp)
+                }
+            }
+
+            // CUDA Acceleration Toggle (Requirement 2)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "CUDA Acceleration (GPU)",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Enable NVIDIA CUDA execution provider for faster speech synthesis. Toggle off for the CPU non-CUDA version.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = prefs.kokoroUseCuda,
+                    onCheckedChange = { ttsService.setKokoroUseCuda(it) }
+                )
+            }
+
+            HorizontalDivider()
+
+            // Python Path (Requirement 1)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Python Installation / Executable",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Using: $resolvedPython",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = prefs.kokoroPythonPath,
+                        onValueChange = { ttsService.setKokoroPythonPath(it) },
+                        placeholder = { Text("Auto-detect (e.g. ~/.local/share/pipx/venvs/kokoro-onnx/bin/python3)") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            TtsFileUtils.openFileChooser("Select Python Executable") { file ->
+                                ttsService.setKokoroPythonPath(file.absolutePath)
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.height(36.dp)
+                    ) {
+                        Text("Browse...", fontSize = 12.sp)
+                    }
+                }
+            }
+
+            // Kokoro Model / Binary Path (Requirement 1)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Kokoro Binary / Model File (.onnx)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    val modelExists = resolvedModel.exists()
+                    Text(
+                        text = "${resolvedModel.name} (${if (modelExists) "✓ Found" else "✗ Missing"})",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (modelExists) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = prefs.kokoroBinaryPath,
+                        onValueChange = { ttsService.setKokoroBinaryPath(it) },
+                        placeholder = { Text("Default: kokoro.onnx") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            TtsFileUtils.openFileChooser(
+                                title = "Select Kokoro Model File (.onnx)",
+                                allowedExtensions = listOf("onnx", "bin")
+                            ) { file ->
+                                ttsService.setKokoroBinaryPath(file.absolutePath)
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.height(36.dp)
+                    ) {
+                        Text("Browse...", fontSize = 12.sp)
+                    }
+                }
+            }
+
+            // Kokoro Voices Path (Requirement 1)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Voices File (.bin)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    val voicesExist = resolvedVoices.exists()
+                    Text(
+                        text = "${resolvedVoices.name} (${if (voicesExist) "✓ Found" else "✗ Missing"})",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (voicesExist) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = prefs.kokoroVoicesPath,
+                        onValueChange = { ttsService.setKokoroVoicesPath(it) },
+                        placeholder = { Text("Default: voices-v1.0.bin") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            TtsFileUtils.openFileChooser(
+                                title = "Select Voices File (.bin)",
+                                allowedExtensions = listOf("bin", "json")
+                            ) { file ->
+                                ttsService.setKokoroVoicesPath(file.absolutePath)
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.height(36.dp)
+                    ) {
+                        Text("Browse...", fontSize = 12.sp)
+                    }
+                }
             }
         }
     }

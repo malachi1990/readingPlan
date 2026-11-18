@@ -33,13 +33,21 @@ class TtsPreferencesManager(appDir: File) {
         val rate = props.getProperty("speechRate", "1.0").toFloatOrNull() ?: 1.0f
         val silence = props.getProperty("sentenceSilence", "0.2").toFloatOrNull() ?: 0.2f
         val autoDl = props.getProperty("autoDownloadVoice", "true").toBooleanStrictOrNull() ?: true
+        val kokoroPython = props.getProperty("kokoroPythonPath", "")
+        val kokoroBinary = props.getProperty("kokoroBinaryPath", "")
+        val kokoroVoices = props.getProperty("kokoroVoicesPath", "")
+        val kokoroUseCuda = props.getProperty("kokoroUseCuda", "false").toBooleanStrictOrNull() ?: false
 
         return TtsPreferences(
             selectedEngine = engine,
             selectedVoiceId = voiceId,
             speechRate = rate,
             sentenceSilence = silence,
-            autoDownloadVoice = autoDl
+            autoDownloadVoice = autoDl,
+            kokoroPythonPath = kokoroPython,
+            kokoroBinaryPath = kokoroBinary,
+            kokoroVoicesPath = kokoroVoices,
+            kokoroUseCuda = kokoroUseCuda
         )
     }
 
@@ -50,6 +58,10 @@ class TtsPreferencesManager(appDir: File) {
         props.setProperty("speechRate", prefs.speechRate.toString())
         props.setProperty("sentenceSilence", prefs.sentenceSilence.toString())
         props.setProperty("autoDownloadVoice", prefs.autoDownloadVoice.toString())
+        props.setProperty("kokoroPythonPath", prefs.kokoroPythonPath)
+        props.setProperty("kokoroBinaryPath", prefs.kokoroBinaryPath)
+        props.setProperty("kokoroVoicesPath", prefs.kokoroVoicesPath)
+        props.setProperty("kokoroUseCuda", prefs.kokoroUseCuda.toString())
 
         try {
             FileOutputStream(prefsFile).use { props.store(it, "Bible Reading Plan TTS Settings") }

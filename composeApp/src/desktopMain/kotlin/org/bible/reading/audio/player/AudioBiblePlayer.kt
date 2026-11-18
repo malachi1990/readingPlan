@@ -65,6 +65,66 @@ class AudioBiblePlayer(
         startCurrentTrack()
     }
 
+    /**
+     * Appends a track to the end of the playlist.
+     * If nothing is currently playing or paused, starts playing it immediately.
+     */
+    fun enqueueTrack(track: AudioTrack) {
+        playlist.add(track)
+        if (currentTrack == null && !isPlaying && !isPaused) {
+            currentTrackIndex = playlist.lastIndex
+            startCurrentTrack()
+        }
+    }
+
+    /**
+     * Appends multiple tracks to the end of the playlist.
+     * If nothing is currently playing or paused, starts playing the first newly enqueued track.
+     */
+    fun enqueueTracks(tracks: List<AudioTrack>) {
+        if (tracks.isEmpty()) return
+        val wasIdle = currentTrack == null && !isPlaying && !isPaused
+        val startIndex = if (wasIdle) playlist.size else currentTrackIndex
+        playlist.addAll(tracks)
+        if (wasIdle) {
+            currentTrackIndex = startIndex.coerceIn(playlist.indices)
+            startCurrentTrack()
+        }
+    }
+
+    /**
+     * Removes a track from the playlist at the given index.
+     */
+    fun removeTrack(index: Int) {
+        if (index !in playlist.indices) return
+        if (index == currentTrackIndex) {
+            if (playlist.size == 1) {
+                stop()
+                playlist.clear()
+            } else {
+                nextTrack()
+                playlist.removeAt(index)
+                if (currentTrackIndex > index) {
+                    currentTrackIndex--
+                }
+            }
+        } else {
+            playlist.removeAt(index)
+            if (currentTrackIndex > index) {
+                currentTrackIndex--
+            }
+        }
+    }
+
+    /**
+     * Clears all tracks from the playlist and stops playback.
+     */
+    fun clearPlaylist() {
+        stop()
+        playlist.clear()
+        currentTrackIndex = 0
+    }
+
     private fun startCurrentTrack() {
         if (playlist.isEmpty() || currentTrackIndex !in playlist.indices) return
         val track = playlist[currentTrackIndex]
@@ -187,6 +247,13 @@ class AudioBiblePlayer(
      */
     fun isTrackActive(title: String): Boolean {
         return (isPlaying || isPaused) && currentTrack?.title == title
+    }
+
+    /**
+     * Checks if the player currently has a track with the given title anywhere in the playlist.
+     */
+    fun isTrackQueued(title: String): Boolean {
+        return playlist.any { it.title == title }
     }
 
     /**

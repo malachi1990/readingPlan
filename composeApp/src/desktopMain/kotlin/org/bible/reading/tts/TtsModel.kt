@@ -141,7 +141,7 @@ object TtsVoiceCatalog {
             gender = "Female",
             engineType = TtsEngineType.KOKORO,
             quality = "high",
-            modelFileName = "kokoro-v0_19.onnx",
+            modelFileName = "kokoro.onnx",
             description = "Expressive, delicate female voice with natural cadence.",
             sizeMb = 86.0
         ),
@@ -153,7 +153,7 @@ object TtsVoiceCatalog {
             gender = "Female",
             engineType = TtsEngineType.KOKORO,
             quality = "high",
-            modelFileName = "kokoro-v0_19.onnx",
+            modelFileName = "kokoro.onnx",
             description = "Lively, clear female voice.",
             sizeMb = 86.0
         ),
@@ -165,7 +165,7 @@ object TtsVoiceCatalog {
             gender = "Male",
             engineType = TtsEngineType.KOKORO,
             quality = "high",
-            modelFileName = "kokoro-v0_19.onnx",
+            modelFileName = "kokoro.onnx",
             description = "Warm, authoritative baritone male voice.",
             sizeMb = 86.0
         ),
@@ -177,7 +177,7 @@ object TtsVoiceCatalog {
             gender = "Male",
             engineType = TtsEngineType.KOKORO,
             quality = "high",
-            modelFileName = "kokoro-v0_19.onnx",
+            modelFileName = "kokoro.onnx",
             description = "Evenly paced, natural conversational male voice.",
             sizeMb = 86.0
         )
@@ -215,5 +215,9 @@ data class TtsPreferences(
     val selectedVoiceId: String = "en_US-lessac-medium",
     val speechRate: Float = 1.0f,
     val sentenceSilence: Float = 0.2f,
-    val autoDownloadVoice: Boolean = true
+    val autoDownloadVoice: Boolean = true,
+    val kokoroPythonPath: String = "",
+    val kokoroBinaryPath: String = "",
+    val kokoroVoicesPath: String = "",
+    val kokoroUseCuda: Boolean = false
 )

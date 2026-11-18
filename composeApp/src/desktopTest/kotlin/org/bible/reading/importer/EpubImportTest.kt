@@ -266,4 +266,99 @@ class EpubImportTest {
         val ch2Content = manager.readKeyContent(book, ch2Key)
         assertTrue(ch2Content.contains("miry slough"), "Chapter 2 content should contain expected text")
     }
+
+    @Test
+    fun testInspectCalvinEpub() = runBlocking {
+        val calvinFile = File("/media/nvmd1/books/theology/Sermons on Ephesians - John Calvin.epub")
+        if (!calvinFile.exists()) return@runBlocking
+
+        val imported = EpubReader.parse(calvinFile)
+        println("=== Imported Book Chapters ===")
+        println("Total parsed chapters: " + imported.chapters.size)
+        for (ch in imported.chapters) {
+            println("  Chapter id: " + ch.id + " | title: " + ch.title + " | length: " + ch.rawContent.length)
+        }
+
+        val tempSwordDir = Files.createTempDirectory("sword_calvin_test").toFile()
+        tempSwordDir.deleteOnExit()
+        val manager = SwordManager(appDir = tempSwordDir)
+        val result = manager.importBook(calvinFile)
+        assertTrue(result.isSuccess)
+        val book = result.getOrThrow()
+
+        val keys = manager.getBookKeys(book)
+        println("=== JSword Keys for Module " + book.initials + " ===")
+        println("Total keys returned: " + keys.size)
+        for (k in keys) {
+            println("  Key name: " + k.name)
+        }
+
+
+        @Test
+        fun testBatchImportMultipleBooks() = runBlocking {
+            val epub1 = createSyntheticEpub(title = "Multi Book Volume One", author = "Author One")
+            val epub2 = createSyntheticEpub(title = "Multi Book Volume Two", author = "Author Two")
+
+            val tempSwordDir = Files.createTempDirectory("sword_batch_e2e_app_dir").toFile()
+            tempSwordDir.deleteOnExit()
+
+            val manager = SwordManager(appDir = tempSwordDir)
+            val progressUpdates = mutableListOf<String>()
+
+            val results = manager.importBooks(listOf(epub1, epub2)) { fileIdx, total, file, step ->
+                progressUpdates.add("$fileIdx/$total - ${file.name}: $step")
+            }
+
+            assertEquals(2, results.size, "Should return results for 2 files")
+            assertTrue(results.all { it.isSuccess }, "All imports in batch should succeed")
+            assertTrue(progressUpdates.isNotEmpty(), "Progress updates should have been reported")
+
+            val book1 = results[0].getOrThrow()
+            val book2 = results[1].getOrThrow()
+
+            assertTrue(book1.initials.isNotBlank())
+            assertTrue(book2.initials.isNotBlank())
+            assertTrue(
+                book1.initials != book2.initials,
+                "Module initials should be distinct: ${book1.initials} vs ${book2.initials}"
+            )
+
+            // Both books should be in manager.installedBooks
+            assertTrue(manager.installedBooks.any { it.initials.equals(book1.initials, ignoreCase = true) })
+            assertTrue(manager.installedBooks.any { it.initials.equals(book2.initials, ignoreCase = true) })
+
+            // Check content of both
+            val keys1 = manager.getBookKeys(book1)
+            val keys2 = manager.getBookKeys(book2)
+            assertTrue(keys1.isNotEmpty())
+            assertTrue(keys2.isNotEmpty())
+        }
+
+        @Test
+        fun testInspectCalvinEpub() = runBlocking {
+            val calvinFile = File("/media/nvmd1/books/theology/Sermons on Ephesians - John Calvin.epub")
+            if (!calvinFile.exists()) return@runBlocking
+
+            val imported = EpubReader.parse(calvinFile)
+            println("=== Imported Book Chapters ===")
+            println("Total parsed chapters: " + imported.chapters.size)
+            for (ch in imported.chapters) {
+                println("  Chapter id: " + ch.id + " | title: " + ch.title + " | length: " + ch.rawContent.length)
+            }
+
+            val tempSwordDir = Files.createTempDirectory("sword_calvin_test").toFile()
+            tempSwordDir.deleteOnExit()
+            val manager = SwordManager(appDir = tempSwordDir)
+            val result = manager.importBook(calvinFile)
+            assertTrue(result.isSuccess)
+            val book = result.getOrThrow()
+
+            val keys = manager.getBookKeys(book)
+            println("=== JSword Keys for Module " + book.initials + " ===")
+            println("Total keys returned: " + keys.size)
+            for (k in keys) {
+                println("  Key name: " + k.name)
+            }
+        }
+    }
 }

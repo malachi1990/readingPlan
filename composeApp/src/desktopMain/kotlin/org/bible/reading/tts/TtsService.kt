@@ -8,6 +8,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.bible.reading.audio.model.AudioTrack
 import org.bible.reading.audio.player.AudioBiblePlayer
@@ -52,6 +54,7 @@ class TtsService(
         private set
 
     private var activeJob: Job? = null
+    private val queueMutex = Mutex()
 
     fun updatePreferences(newPrefs: TtsPreferences) {
         preferences = newPrefs
@@ -76,6 +79,22 @@ class TtsService(
         updatePreferences(preferences.copy(sentenceSilence = silence.coerceIn(0.0f, 0.8f)))
     }
 
+    fun setKokoroPythonPath(path: String) {
+        updatePreferences(preferences.copy(kokoroPythonPath = path.trim()))
+    }
+
+    fun setKokoroBinaryPath(path: String) {
+        updatePreferences(preferences.copy(kokoroBinaryPath = path.trim()))
+    }
+
+    fun setKokoroVoicesPath(path: String) {
+        updatePreferences(preferences.copy(kokoroVoicesPath = path.trim()))
+    }
+
+    fun setKokoroUseCuda(useCuda: Boolean) {
+        updatePreferences(preferences.copy(kokoroUseCuda = useCuda))
+    }
+
     fun getActiveVoice(): TtsVoice {
         return TtsVoiceCatalog.findVoice(preferences.selectedVoiceId)
     }
@@ -83,7 +102,11 @@ class TtsService(
     fun isVoiceReady(voice: TtsVoice): Boolean {
         return when (voice.engineType) {
             TtsEngineType.PIPER -> piperManager.isBinaryInstalled() && piperManager.isVoiceDownloaded(voice)
-            TtsEngineType.KOKORO -> kokoroManager.isAvailable()
+            TtsEngineType.KOKORO -> kokoroManager.isAvailable(
+                configuredPython = preferences.kokoroPythonPath,
+                configuredModel = preferences.kokoroBinaryPath,
+                configuredVoices = preferences.kokoroVoicesPath
+            )
             TtsEngineType.SYSTEM -> true
         }
     }
@@ -150,8 +173,11 @@ class TtsService(
         val speed = preferences.speechRate
         val silence = preferences.sentenceSilence
 
-        // Calculate cache key
-        val cacheKey = hashText("${preferences.selectedEngine.id}:${voice.id}:$speed:$silence:$textToSpeak")
+        // Calculate cache key incorporating engine, speed, silence, and kokoro options
+        val cacheKey = hashText(
+            "${preferences.selectedEngine.id}:${voice.id}:$speed:$silence:" +
+            "${preferences.kokoroUseCuda}:${preferences.kokoroBinaryPath}:$textToSpeak"
+        )
         val cachedFile = File(cacheDir, "$cacheKey.wav")
 
         if (cachedFile.exists() && cachedFile.length() > 1024) {
@@ -177,7 +203,16 @@ class TtsService(
                 piperManager.synthesize(textToSpeak, tempFile, voice, speed, silence)
             }
             TtsEngineType.KOKORO -> {
-                kokoroManager.synthesize(textToSpeak, tempFile, voice, speed)
+                kokoroManager.synthesize(
+                    text = textToSpeak,
+                    outputWav = tempFile,
+                    voice = voice,
+                    speechRate = speed,
+                    configuredPython = preferences.kokoroPythonPath,
+                    configuredModel = preferences.kokoroBinaryPath,
+                    configuredVoices = preferences.kokoroVoicesPath,
+                    useCuda = preferences.kokoroUseCuda
+                )
             }
             TtsEngineType.SYSTEM -> {
                 systemTtsEngine.synthesize(textToSpeak, tempFile, speed)
@@ -194,7 +229,49 @@ class TtsService(
     }
 
     /**
-     * Reads a full chapter passage from Further Study.
+     * Saves a synthesized audio file to a user-specified destination file.
+     */
+    fun saveAudioToFile(sourceFile: File, destinationFile: File): Result<File> {
+        return try {
+            destinationFile.parentFile?.mkdirs()
+            sourceFile.copyTo(destinationFile, overwrite = true)
+            statusMessage = "Audio saved to ${destinationFile.name}"
+            Result.success(destinationFile)
+        } catch (e: Exception) {
+            val err = "Failed to save audio: ${e.message}"
+            statusMessage = err
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Saves an AudioTrack's file to a user-specified destination.
+     */
+    fun saveTrackToFile(track: AudioTrack, destinationFile: File): Result<File> {
+        return saveAudioToFile(track.file, destinationFile)
+    }
+
+    /**
+     * Synthesizes text directly to a user-specified destination file without playing.
+     */
+    suspend fun synthesizeToFile(
+        textToSpeak: String,
+        trackTitle: String,
+        destinationFile: File
+    ): Result<File> = withContext(Dispatchers.IO) {
+        statusMessage = "Synthesizing audio for export..."
+        val synthRes = synthesizeAudio(textToSpeak, trackTitle)
+        if (synthRes.isFailure) {
+            val err = synthRes.exceptionOrNull()?.message ?: "Synthesis failed"
+            statusMessage = "Export failed: $err"
+            return@withContext synthRes
+        }
+        val wavFile = synthRes.getOrThrow()
+        saveAudioToFile(wavFile, destinationFile)
+    }
+
+    /**
+     * Reads a full chapter passage from Further Study immediately.
      */
     fun readPassage(
         passage: ChapterPassage,
@@ -223,6 +300,62 @@ class TtsService(
     }
 
     /**
+     * Queues a scripture chapter passage for TTS playback.
+     */
+    fun queuePassage(
+        passage: ChapterPassage,
+        book: Book,
+        player: AudioBiblePlayer
+    ) {
+        val trackTitle = "${passage.bookName} ${passage.chapterNumber} (${book.initials})"
+
+        if (player.isTrackQueued(trackTitle)) {
+            statusMessage = "\"$trackTitle\" is already in the playlist queue."
+            return
+        }
+
+        val speechText = TtsTextCleaner.formatPassageForSpeech(
+            passage.bookName,
+            passage.chapterNumber,
+            passage.fullText
+        )
+        if (speechText.isBlank()) {
+            statusMessage = "No text content available to read."
+            return
+        }
+
+        if (!player.isPlaying && !player.isPaused && player.currentTrack == null) {
+            startReadingTrack(trackTitle, book.name, speechText, player)
+            return
+        }
+
+        scope.launch {
+            statusMessage = "Queuing \"$trackTitle\"..."
+            try {
+                val res = synthesizeAudio(speechText, trackTitle)
+                if (res.isSuccess) {
+                    val file = res.getOrThrow()
+                    val durationMs = computeDurationMs(file)
+                    val track = AudioTrack(
+                        file = file,
+                        title = trackTitle,
+                        subtitle = book.name,
+                        durationMs = durationMs
+                    )
+                    queueMutex.withLock {
+                        player.enqueueTrack(track)
+                    }
+                    statusMessage = "Queued \"$trackTitle\" (${player.playlist.size} in queue)"
+                } else {
+                    statusMessage = "Failed to queue \"$trackTitle\": ${res.exceptionOrNull()?.message}"
+                }
+            } catch (e: Exception) {
+                statusMessage = "Error queuing \"$trackTitle\": ${e.message}"
+            }
+        }
+    }
+
+    /**
      * Reads an individual verse.
      */
     fun readVerse(
@@ -245,7 +378,56 @@ class TtsService(
     }
 
     /**
-     * Reads a general book section or dictionary entry.
+     * Queues an individual verse for TTS playback.
+     */
+    fun queueVerse(
+        reference: String,
+        verseText: String,
+        bookInitials: String,
+        player: AudioBiblePlayer
+    ) {
+        val trackTitle = "$reference ($bookInitials)"
+        if (player.isTrackQueued(trackTitle)) {
+            statusMessage = "\"$trackTitle\" is already in queue."
+            return
+        }
+
+        val speechText = TtsTextCleaner.formatVerseForSpeech(reference, verseText)
+        if (speechText.isBlank()) return
+
+        if (!player.isPlaying && !player.isPaused && player.currentTrack == null) {
+            startReadingTrack(trackTitle, "Verse $reference", speechText, player)
+            return
+        }
+
+        scope.launch {
+            statusMessage = "Queuing \"$trackTitle\"..."
+            try {
+                val res = synthesizeAudio(speechText, trackTitle)
+                if (res.isSuccess) {
+                    val file = res.getOrThrow()
+                    val durationMs = computeDurationMs(file)
+                    val track = AudioTrack(
+                        file = file,
+                        title = trackTitle,
+                        subtitle = "Verse $reference",
+                        durationMs = durationMs
+                    )
+                    queueMutex.withLock {
+                        player.enqueueTrack(track)
+                    }
+                    statusMessage = "Queued \"$trackTitle\" (${player.playlist.size} in queue)"
+                } else {
+                    statusMessage = "Failed to queue \"$trackTitle\": ${res.exceptionOrNull()?.message}"
+                }
+            } catch (e: Exception) {
+                statusMessage = "Error queuing \"$trackTitle\": ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * Reads a general book section or dictionary entry immediately.
      */
     fun readSection(
         title: String,
@@ -267,6 +449,60 @@ class TtsService(
         }
 
         startReadingTrack(trackTitle, subtitle, speechText, player)
+    }
+
+    /**
+     * Queues a general book section or dictionary entry for TTS playback.
+     * If playback is idle, starts playing immediately; otherwise enqueues to playlist.
+     */
+    fun queueSection(
+        title: String,
+        subtitle: String,
+        content: String,
+        player: AudioBiblePlayer
+    ) {
+        val trackTitle = if (subtitle.isNotBlank()) "$title • $subtitle" else title
+
+        if (player.isTrackQueued(trackTitle)) {
+            statusMessage = "\"$title\" is already in the queue."
+            return
+        }
+
+        val speechText = TtsTextCleaner.formatSectionForSpeech(title, subtitle, content)
+        if (speechText.isBlank()) {
+            statusMessage = "No content available to read for \"$title\"."
+            return
+        }
+
+        if (!player.isPlaying && !player.isPaused && player.currentTrack == null) {
+            startReadingTrack(trackTitle, subtitle, speechText, player)
+            return
+        }
+
+        scope.launch {
+            statusMessage = "Queuing \"$title\"..."
+            try {
+                val res = synthesizeAudio(speechText, trackTitle)
+                if (res.isSuccess) {
+                    val file = res.getOrThrow()
+                    val durationMs = computeDurationMs(file)
+                    val track = AudioTrack(
+                        file = file,
+                        title = trackTitle,
+                        subtitle = subtitle,
+                        durationMs = durationMs
+                    )
+                    queueMutex.withLock {
+                        player.enqueueTrack(track)
+                    }
+                    statusMessage = "Added \"$title\" to queue (${player.playlist.size} total)"
+                } else {
+                    statusMessage = "Failed to queue \"$title\": ${res.exceptionOrNull()?.message}"
+                }
+            } catch (e: Exception) {
+                statusMessage = "Error queuing \"$title\": ${e.message}"
+            }
+        }
     }
 
     /**
@@ -332,7 +568,7 @@ class TtsService(
         player.stop()
     }
 
-    private fun computeDurationMs(file: File): Long {
+    fun computeDurationMs(file: File): Long {
         return try {
             AudioSystem.getAudioInputStream(file).use { ais ->
                 val format = ais.format

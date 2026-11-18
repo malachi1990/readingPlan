@@ -81,4 +81,21 @@ class BookImportService(
             Result.failure(e)
         }
     }
+
+    /**
+     * Imports multiple books sequentially from local files.
+     */
+    suspend fun importFiles(
+        files: List<File>,
+        onProgress: ((fileIndex: Int, totalFiles: Int, file: File, step: String) -> Unit)? = null
+    ): List<Result<Book>> {
+        val results = mutableListOf<Result<Book>>()
+        for ((index, file) in files.withIndex()) {
+            val result = importFile(file) { step ->
+                onProgress?.invoke(index, files.size, file, step)
+            }
+            results.add(result)
+        }
+        return results
+    }
 }
