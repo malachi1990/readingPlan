@@ -210,8 +210,31 @@ class AudioBiblePlayer(
     }
 
     fun seekTo(positionMs: Long) {
-        activeSession?.seekTo(positionMs)
-        currentPositionMs = positionMs
+        val maxDuration = if (durationMs > 0) durationMs else Long.MAX_VALUE
+        val target = positionMs.coerceIn(0L, maxDuration)
+        currentPositionMs = target
+        activeSession?.seekTo(target)
+    }
+
+    /**
+     * Relative seek by deltaMs (positive to seek forward, negative to rewind).
+     */
+    fun seekBy(deltaMs: Long) {
+        seekTo(currentPositionMs + deltaMs)
+    }
+
+    /**
+     * Seeks forward by the specified duration in milliseconds (default 10 seconds).
+     */
+    fun seekForward(ms: Long = 10_000L) {
+        seekBy(ms)
+    }
+
+    /**
+     * Seeks backward by the specified duration in milliseconds (default 10 seconds).
+     */
+    fun seekBackward(ms: Long = 10_000L) {
+        seekBy(-ms)
     }
 
     fun setVolumeLevel(newVolume: Float) {

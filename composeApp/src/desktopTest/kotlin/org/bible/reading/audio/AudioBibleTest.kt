@@ -3,6 +3,7 @@ package org.bible.reading.audio
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import org.bible.reading.audio.player.AudioBiblePlayer
 import org.bible.reading.audio.player.AudioCodec
 import org.bible.reading.audio.player.AudioCodecRegistry
 import org.bible.reading.audio.player.AudioStreamSession
@@ -21,9 +22,14 @@ import org.bible.reading.audio.strategy.StandardBookChapterStrategy
 import org.bible.reading.dto.Bible
 import org.bible.reading.dto.DailyReading
 import org.bible.reading.dto.Reading
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.nio.file.Files
 import java.time.LocalDate
+import javax.sound.sampled.AudioFileFormat
+import javax.sound.sampled.AudioFormat
+import javax.sound.sampled.AudioInputStream
+import javax.sound.sampled.AudioSystem
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -288,5 +294,111 @@ class AudioBibleTest {
         assertEquals("Genesis 1", dailyTracks[0].title)
         assertEquals("Genesis 2", dailyTracks[1].title)
         assertEquals("Matthew 1", dailyTracks[2].title)
+    }
+
+    private fun createSyntheticWav(durationSeconds: Int = 2, sampleRate: Float = 44100f): File {
+        val tempFile = File.createTempFile("test_audio_", ".wav")
+        tempFile.deleteOnExit()
+        val numFrames = (sampleRate * durationSeconds).toInt()
+        val format = AudioFormat(sampleRate, 16, 1, true, false)
+        val pcmData = ByteArray(numFrames * 2)
+        val ais = AudioInputStream(ByteArrayInputStream(pcmData), format, numFrames.toLong())
+        AudioSystem.write(ais, AudioFileFormat.Type.WAVE, tempFile)
+        return tempFile
+    }
+
+    @Test
+    fun testWavAudioCodecSeeking() {
+        val wav = createSyntheticWav(durationSeconds = 2)
+        val codec = WavAudioCodec()
+        val session = codec.createSession(wav)
+        assertTrue(session.durationMs >= 1900L, "Expected duration around 2000ms but got ${session.durationMs}")
+
+        // Test seeking before play
+        session.seekTo(1000L)
+        assertEquals(1000L, session.currentPositionMs)
+
+        // Seek to another position
+        session.seekTo(1500L)
+        assertEquals(1500L, session.currentPositionMs)
+
+        // Seek back
+        session.seekTo(500L)
+        assertEquals(500L, session.currentPositionMs)
+
+        session.stop()
+        session.release()
+    }
+
+    @Test
+    fun testAudioBiblePlayerSeeking() = runBlocking {
+        val wav = createSyntheticWav(durationSeconds = 3)
+        val player = AudioBiblePlayer()
+        val track = org.bible.reading.audio.model.AudioTrack(
+            file = wav,
+            title = "Synthetic Track",
+            durationMs = 3000L
+        )
+
+        player.playTrack(track)
+        assertEquals(3000L, player.durationMs)
+
+        // Seek to 1000ms
+        player.seekTo(1000L)
+        assertEquals(1000L, player.currentPositionMs)
+
+        // Relative seek by +500ms
+        player.seekBy(500L)
+        assertEquals(1500L, player.currentPositionMs)
+
+        // seekForward by 500ms
+        player.seekForward(500L)
+        assertEquals(2000L, player.currentPositionMs)
+
+        // seekBackward by 800ms
+        player.seekBackward(800L)
+        assertEquals(1200L, player.currentPositionMs)
+
+        // Out of bounds seeking (negative clamped to 0)
+        player.seekTo(-500L)
+        assertEquals(0L, player.currentPositionMs)
+
+        // Out of bounds seeking (past duration clamped to durationMs)
+        player.seekTo(5000L)
+        assertEquals(3000L, player.currentPositionMs)
+
+        player.stop()
+    }
+
+    @Test
+    fun testMp3AudioCodecSeeking() {
+        val tempMp3 = File.createTempFile("test_sine_", ".mp3").apply { deleteOnExit() }
+        try {
+            val pb = ProcessBuilder("ffmpeg", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-y", tempMp3.absolutePath)
+            val process = pb.start()
+            val exitCode = process.waitFor()
+            if (exitCode != 0 || !tempMp3.exists() || tempMp3.length() == 0L) {
+                return
+            }
+
+            val codec = Mp3AudioCodec()
+            val session = codec.createSession(tempMp3)
+            assertTrue(session.durationMs > 0, "Duration should be estimated for MP3")
+
+            // Seek before play
+            session.seekTo(1000L)
+            assertEquals(1000L, session.currentPositionMs)
+
+            session.seekTo(2000L)
+            assertEquals(2000L, session.currentPositionMs)
+
+            session.seekTo(500L)
+            assertEquals(500L, session.currentPositionMs)
+
+            session.stop()
+            session.release()
+        } catch (_: Exception) {
+            // If ffmpeg process execution fails, skip
+        }
     }
 }

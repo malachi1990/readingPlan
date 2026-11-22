@@ -6,6 +6,16 @@ import org.bible.reading.importer.model.ImportedChapter
 /**
  * Transforms XHTML/HTML chapter contents from imported documents into
  * Open Scripture Information Standard (OSIS) 2.1.1 compliant XML.
+ *
+ * Ensures faithful preservation of text formatting and whitespace:
+ * - Tabs (`\t`), newlines (`\n`), and carriage returns (`\r` encoded as `&#13;` to survive XML normalization)
+ * - Line breaks (`<br>`, `<hr>`) converted to `<lb/>\n`
+ * - Paragraph separation (`<p>`, `<div>`)
+ * - Preformatted blocks (`<pre>`) with internal whitespace and indentation
+ * - Section headings (`<h1>`..`<h6>`) with `canonical="true"` and paragraph spacing
+ * - Blockquotes (`<blockquote>`) and lists (`<ul>`, `<ol>`, `<li>`)
+ * - Tables (`<table>`, `<tr>`, `<td>`, `<th>`)
+ * - Whitespace entities (`&nbsp;`, `&ensp;`, `&emsp;`, `&thinsp;`, `&tab;`, `&NewLine;`)
  */
 object OsisConverter {
 
@@ -23,7 +33,7 @@ object OsisConverter {
             append("<div type=\"section\" osisID=\"").append(safeId).append("\">\n")
             // Include title if not already present in the converted body
             if (!convertedBody.contains("<title", ignoreCase = true)) {
-                append("  <title level=\"1\">").append(safeTitle).append("</title>\n")
+                append("  <title canonical=\"true\" level=\"1\">").append(safeTitle).append("</title>\n\n")
             }
             append("  ").append(convertedBody).append("\n")
             append("</div>")
@@ -58,7 +68,7 @@ object OsisConverter {
             append("""      <div type="book">""").append("\n")
 
             for (ch in book.chapters) {
-                append("        ").append(toOsisSection(ch).replace("\n", "\n        ")).append("\n")
+                append("   ").append(toOsisSection(ch).replace("\n", "\n  ")).append("\n")
             }
 
             append("""      </div>""").append("\n")
@@ -69,15 +79,19 @@ object OsisConverter {
     }
 
     /**
-     * Converts raw XHTML/HTML text into valid OSIS elements:
-     * - Headings <h1>..<h6> -> <title level="...">
-     * - <p> -> <p>
+     * Converts raw XHTML/HTML text into valid OSIS elements while preserving whitespace and formatting:
+     * - Preformatted text <pre> -> preserves tabs, carriage returns, and newlines with <lb/>\n
+     * - Headings <h1>..<h6> -> <title canonical="true" level="...">
+     * - Line breaks <br>, <hr> -> <lb/>\n
+     * - Paragraphs <p> -> <p> with block separation
      * - <em>, <i> -> <hi type="italic">
      * - <strong>, <b> -> <hi type="bold">
      * - <u> -> <hi type="underline">
      * - <blockquote> -> <q type="block">
      * - <ul>, <ol>, <li> -> <list>, <item>
+     * - <table>, <tr>, <td>, <th> -> <table>, <row>, <cell>
      * - <aside>, class="footnote" -> <note type="explanation">
+     * - Literal whitespace such as tabs (\t), new lines (\n), and carriage returns (\r)
      * - Strips scripts, styles, iframes, invalid tags.
      */
     fun convertHtmlToOsisFragment(rawHtml: String): String {
@@ -97,38 +111,69 @@ object OsisConverter {
             text = bodyMatch.groupValues[1]
         }
 
-        // 4. Decode / normalize common HTML entities to standard XML characters
+        // 4. Decode / normalize common HTML whitespace and typography entities
         text = normalizeHtmlEntities(text)
 
-        // 5. Line break / horizontal rule
-        text = text.replace(Regex("""<br\s*/?>""", RegexOption.IGNORE_CASE), "<lb/>")
-        text = text.replace(Regex("""<hr\s*/?>""", RegexOption.IGNORE_CASE), "<lb/>")
+        // 5. Preformatted blocks: preserve whitespace (tabs, carriage returns, new lines) inside <pre>
+        text = text.replace(Regex("""<pre\b[^>]*>(.*?)</pre>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))) { m ->
+            val preContent = m.groupValues[1]
+            val withLb = preContent
+                .replace("\r\n", "&#13;\n<lb/>")
+                .replace("\r", "&#13;<lb/>\n")
+                .replace("\n", "\n<lb/>\n")
+            "\n\n<p>$withLb</p>\n\n"
+        }
 
-        // 6. Footnotes / Notes: <aside...> -> <note type="explanation">
-        text = text.replace(Regex("""<aside[^>]*>""", RegexOption.IGNORE_CASE), "<note type=\"explanation\">")
+        // 6. Preserve raw carriage returns in XML character data (so XML parsers don't normalize \r to \n)
+        text = preserveCarriageReturns(text)
+
+        // 7. Line break / horizontal rule (match any attributes, e.g. <br class="calibre"/>)
+        text = text.replace(Regex("""<br\b[^>]*\/?>""", RegexOption.IGNORE_CASE), "<lb/>\n")
+        text = text.replace(Regex("""<hr\b[^>]*\/?>""", RegexOption.IGNORE_CASE), "<lb/>\n")
+
+        // 8. Footnotes / Notes: <aside...> -> <note type="explanation">
+        text = text.replace(Regex("""<aside\b[^>]*>""", RegexOption.IGNORE_CASE), "<note type=\"explanation\">")
         text = text.replace(Regex("""</aside>""", RegexOption.IGNORE_CASE), "</note>")
         text = text.replace(Regex("""<div[^>]*class=["'][^"']*footnote[^"']*["'][^>]*>""", RegexOption.IGNORE_CASE), "<note type=\"explanation\">")
 
-        // 7. Headings <h1>..<h6> -> <title level="1..6">
+        // 9. Headings <h1>..<h6> -> <title canonical="true" level="1..6">
         for (i in 1..6) {
-            text = text.replace(Regex("""<h$i[^>]*>(.*?)</h$i>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))) { m ->
-                "<title level=\"$i\">${m.groupValues[1].trim()}</title>"
+            text = text.replace(Regex("""<h$i\b[^>]*>(.*?)</h$i>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))) { m ->
+                "\n\n<title canonical=\"true\" level=\"$i\">${m.groupValues[1].trim()}</title>\n\n"
             }
         }
 
-        // 8. Blockquotes -> <q type="block">
-        text = text.replace(Regex("""<blockquote[^>]*>""", RegexOption.IGNORE_CASE), "<q type=\"block\">")
-        text = text.replace(Regex("""</blockquote>""", RegexOption.IGNORE_CASE), "</q>")
+        // 10. Blockquotes -> <q type="block">
+        text = text.replace(Regex("""<blockquote\b[^>]*>""", RegexOption.IGNORE_CASE), "\n\n<q type=\"block\">")
+        text = text.replace(Regex("""</blockquote>""", RegexOption.IGNORE_CASE), "\n</q>\n")
 
-        // 9. Lists -> <list> and <item>
-        text = text.replace(Regex("""<ul[^>]*>""", RegexOption.IGNORE_CASE), "<list>")
-        text = text.replace(Regex("""</ul>""", RegexOption.IGNORE_CASE), "</list>")
-        text = text.replace(Regex("""<ol[^>]*>""", RegexOption.IGNORE_CASE), "<list>")
-        text = text.replace(Regex("""</ol>""", RegexOption.IGNORE_CASE), "</list>")
-        text = text.replace(Regex("""<li[^>]*>""", RegexOption.IGNORE_CASE), "<item>")
-        text = text.replace(Regex("""</li>""", RegexOption.IGNORE_CASE), "</item>")
+        // 11. Lists -> <list> and <item>
+        text = text.replace(Regex("""<ul\b[^>]*>""", RegexOption.IGNORE_CASE), "\n<list>\n")
+        text = text.replace(Regex("""</ul>""", RegexOption.IGNORE_CASE), "\n</list>\n")
+        text = text.replace(Regex("""<ol\b[^>]*>""", RegexOption.IGNORE_CASE), "\n<list>\n")
+        text = text.replace(Regex("""</ol>""", RegexOption.IGNORE_CASE), "\n</list>\n")
+        text = text.replace(Regex("""<li\b[^>]*>""", RegexOption.IGNORE_CASE), "\n<item>")
+        text = text.replace(Regex("""</li>""", RegexOption.IGNORE_CASE), "</item>\n")
 
-        // 10. Styles: italic & bold & underline
+        // 12. Tables -> <table>, <row>, <cell>
+        text = text.replace(Regex("""<table\b[^>]*>""", RegexOption.IGNORE_CASE), "\n<table>\n")
+        text = text.replace(Regex("""</table>""", RegexOption.IGNORE_CASE), "\n</table>\n")
+        text = text.replace(Regex("""<tr\b[^>]*>""", RegexOption.IGNORE_CASE), "\n<row>\n")
+        text = text.replace(Regex("""</tr>""", RegexOption.IGNORE_CASE), "\n</row>")
+        text = text.replace(Regex("""<th\b[^>]*>""", RegexOption.IGNORE_CASE), "<cell>")
+        text = text.replace(Regex("""</th>""", RegexOption.IGNORE_CASE), "\t</cell>")
+        text = text.replace(Regex("""<td\b[^>]*>""", RegexOption.IGNORE_CASE), "<cell>")
+        text = text.replace(Regex("""</td>""", RegexOption.IGNORE_CASE), "\t</cell>")
+
+        // 13. Paragraphs: ensure separation between paragraphs
+        text = text.replace(Regex("""<p\b[^>]*>""", RegexOption.IGNORE_CASE), "\n<p>")
+        text = text.replace(Regex("""</p>""", RegexOption.IGNORE_CASE), "</p>\n")
+
+        // 14. Divisions: if <div> is used as block divider
+        text = text.replace(Regex("""<div\b[^>]*>""", RegexOption.IGNORE_CASE), "\n")
+        text = text.replace(Regex("""</div>""", RegexOption.IGNORE_CASE), "\n")
+
+        // 15. Styles: italic, bold, underline
         text = text.replace(Regex("""<(?:em|i)\b[^>]*>(.*?)</(?:em|i)>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))) { m ->
             "<hi type=\"italic\">${m.groupValues[1]}</hi>"
         }
@@ -139,7 +184,7 @@ object OsisConverter {
             "<hi type=\"underline\">${m.groupValues[1]}</hi>"
         }
 
-        // 11. Bible reference anchors or hyperlinks
+        // 16. Bible reference anchors or hyperlinks
         text = text.replace(Regex("""<a\b[^>]*osisRef=["']([^"']+)["'][^>]*>(.*?)</a>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))) { m ->
             "<reference osisRef=\"${escapeXml(m.groupValues[1])}\">${m.groupValues[2]}</reference>"
         }
@@ -148,25 +193,26 @@ object OsisConverter {
             m.groupValues[1]
         }
 
-        // 12. Strip all remaining disallowed tags while keeping their text contents
-        // Allow only valid OSIS fragment tags: p, title, hi, q, list, item, note, reference, lb, div
-        val allowedTags = setOf("p", "title", "hi", "q", "list", "item", "note", "reference", "lb", "div")
+        // 17. Strip all remaining disallowed tags while keeping their text contents
+        // Allow valid OSIS fragment tags
+        val allowedTags = setOf("p", "title", "hi", "q", "list", "item", "note", "reference", "lb", "div", "table", "row", "cell")
 
         text = text.replace(Regex("""</?([a-zA-Z0-9]+)(\s+[^>]*)?/?>""")) { m ->
             val tagName = m.groupValues[1].lowercase()
             if (allowedTags.contains(tagName)) {
-                // Keep the tag if allowed, but sanitize attributes
                 val rawTag = m.value
                 sanitizeTagAttributes(tagName, rawTag)
             } else {
-                // Disallowed tag: strip out the markup
                 ""
             }
         }
 
-        // 13. Ensure text is enclosed in at least <p> tags if no paragraphs or titles exist
+        // Normalize excessive newlines (keep up to 2 for paragraph breaks)
+        text = text.replace(Regex("""\n{3,}"""), "\n")
+
+        // 18. Ensure text is enclosed in at least <p> tags if no paragraphs or titles exist
         val trimmed = text.trim()
-        if (trimmed.isNotBlank() && !trimmed.startsWith("<")) {
+        if (trimmed.isNotBlank() && !trimmed.startsWith("<p") && !trimmed.startsWith("<title") && !trimmed.startsWith("<div")) {
             return "<p>$trimmed</p>"
         }
 
@@ -182,7 +228,7 @@ object OsisConverter {
         return when (tagName) {
             "title" -> {
                 val level = Regex("""level=["']?(\d)["']?""").find(fullTag)?.groupValues?.get(1) ?: "1"
-                "<title level=\"$level\">"
+                "<title canonical=\"true\" level=\"$level\">"
             }
             "hi" -> {
                 val type = Regex("""type=["']?([a-zA-Z]+)["']?""").find(fullTag)?.groupValues?.get(1) ?: "italic"
@@ -190,11 +236,14 @@ object OsisConverter {
             }
             "q" -> "<q type=\"block\">"
             "note" -> "<note type=\"explanation\">"
-            "lb" -> "<lb/>"
+            "lb" -> "<lb/>\n"
             "list" -> "<list>"
             "item" -> "<item>"
             "p" -> "<p>"
             "div" -> "<div type=\"section\">"
+            "table" -> "<table>"
+            "row" -> "<row>"
+            "cell" -> "<cell>"
             "reference" -> {
                 val osisRef = Regex("""osisRef=["']([^"']+)["']""").find(fullTag)?.groupValues?.get(1)
                 if (osisRef != null) "<reference osisRef=\"$osisRef\">" else "<reference>"
@@ -203,9 +252,22 @@ object OsisConverter {
         }
     }
 
+    private fun preserveCarriageReturns(text: String): String {
+        // Encode literal carriage returns as character reference &#13; so that
+        // W3C XML parsers (which normalize \r\n and \r to \n) preserve them faithfully
+        return text.replace("\r", "&#13;")
+    }
+
     private fun normalizeHtmlEntities(text: String): String {
         return text
             .replace("&nbsp;", "&#160;")
+            .replace("&ensp;", "&#8194;")
+            .replace("&emsp;", "&#8195;")
+            .replace("&thinsp;", "&#8201;")
+            .replace("&zwnj;", "&#8204;")
+            .replace("&zwj;", "&#8205;")
+            .replace("&tab;", "\t")
+            .replace("&NewLine;", "\n")
             .replace("&mdash;", "&#8212;")
             .replace("&ndash;", "&#8211;")
             .replace("&hellip;", "&#8230;")

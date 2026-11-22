@@ -63,10 +63,15 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
                     val bs = Bitstream(bis)
                     val header = bs.readFrame()
                     if (header != null) {
-                        val bitrate = header.bitrate()
-                        if (bitrate > 0) {
-                            val fileSize = file.length()
-                            durationMs = (fileSize * 8L * 1000L) / bitrate
+                        val maxMs = header.total_ms(file.length().coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+                        if (maxMs > 0) {
+                            durationMs = maxMs.toLong()
+                        } else {
+                            val bitrate = header.bitrate()
+                            if (bitrate > 0) {
+                                val fileSize = file.length()
+                                durationMs = (fileSize * 8L * 1000L) / bitrate
+                            }
                         }
                     }
                 }
@@ -117,6 +122,7 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
 
     override fun seekTo(positionMs: Long) {
         val target = positionMs.coerceAtLeast(0L)
+        currentPositionAtomic.set(target)
         pendingSeekMs.set(target)
     }
 
@@ -192,12 +198,41 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
 
             var activeBs = initialBitstream
 
+            fun applySeek(seekTargetMs: Long) {
+                val targetFrame = (seekTargetMs / msPerFrame).toLong()
+                dataLine.flush()
+
+                if (targetFrame < currentFrame) {
+                    try {
+                        activeBs.close()
+                        inputStream?.close()
+                    } catch (_: Exception) {}
+
+                    val newStream = BufferedInputStream(FileInputStream(file))
+                    inputStream = newStream
+                    activeBs = Bitstream(newStream)
+                    bitstream = activeBs
+                    currentFrame = 0
+                }
+
+                while (currentFrame < targetFrame && !isStopped.get()) {
+                    val skipHeader = activeBs.readFrame() ?: break
+                    activeBs.closeFrame()
+                    currentFrame++
+                }
+                currentPositionAtomic.set((currentFrame * msPerFrame).toLong())
+            }
+
             // Main playback loop
             while (!isStopped.get()) {
                 // Handle Pause
                 if (isPaused) {
                     dataLine.stop()
                     while (isPaused && !isStopped.get()) {
+                        val seekTargetMs = pendingSeekMs.getAndSet(-1L)
+                        if (seekTargetMs >= 0) {
+                            applySeek(seekTargetMs)
+                        }
                         Thread.sleep(50)
                     }
                     if (!isStopped.get()) {
@@ -209,25 +244,7 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
                 // Handle Seek
                 val seekTargetMs = pendingSeekMs.getAndSet(-1L)
                 if (seekTargetMs >= 0) {
-                    val targetFrame = (seekTargetMs / msPerFrame).toLong()
-                    try {
-                        activeBs.close()
-                        inputStream?.close()
-                    } catch (_: Exception) {}
-
-                    val newStream = BufferedInputStream(FileInputStream(file))
-                    inputStream = newStream
-                    activeBs = Bitstream(newStream)
-                    bitstream = activeBs
-                    dataLine.flush()
-                    currentFrame = 0
-
-                    while (currentFrame < targetFrame && !isStopped.get()) {
-                        val skipHeader = activeBs.readFrame() ?: break
-                        activeBs.closeFrame()
-                        currentFrame++
-                    }
-                    currentPositionAtomic.set((currentFrame * msPerFrame).toLong())
+                    applySeek(seekTargetMs)
                 }
 
                 // Decode next frame

@@ -55,6 +55,11 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
                 val frames = ais.frameLength
                 if (frames > 0 && format.frameRate > 0) {
                     durationMs = (frames * 1000L / format.frameRate.toLong())
+                } else if (format.frameRate > 0 && format.frameSize > 0) {
+                    val dataSize = file.length() - 44
+                    if (dataSize > 0) {
+                        durationMs = (dataSize * 1000L / (format.frameRate.toLong() * format.frameSize))
+                    }
                 }
             }
         } catch (_: Exception) {}
@@ -102,7 +107,9 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
     }
 
     override fun seekTo(positionMs: Long) {
-        pendingSeekMs.set(positionMs.coerceAtLeast(0L))
+        val target = positionMs.coerceAtLeast(0L)
+        currentPositionAtomic.set(target)
+        pendingSeekMs.set(target)
     }
 
     override fun setVolume(volume: Float) {
@@ -164,10 +171,48 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
             var totalBytesRead = 0L
             var activePcmIn = initialPcmIn
 
+            fun applySeek(seekTargetMs: Long) {
+                try {
+                    activePcmIn.close()
+                    audioIn?.close()
+                } catch (_: Exception) {}
+
+                val newAudioIn = AudioSystem.getAudioInputStream(file)
+                audioIn = newAudioIn
+                val newPcmIn = AudioSystem.getAudioInputStream(decodedFormat, newAudioIn)
+                pcmIn = newPcmIn
+                activePcmIn = newPcmIn
+                dataLine.flush()
+
+                val frameSize = decodedFormat.frameSize
+                val rawTargetBytes = (seekTargetMs * bytesPerMs).toLong()
+                val targetBytes = if (frameSize > 0) rawTargetBytes - (rawTargetBytes % frameSize) else rawTargetBytes
+
+                var remainingToSkip = targetBytes
+                val skipBuffer = ByteArray(4096)
+                while (remainingToSkip > 0 && !isStopped.get()) {
+                    val skipped = activePcmIn.skip(remainingToSkip)
+                    if (skipped <= 0) {
+                        val toRead = remainingToSkip.coerceAtMost(skipBuffer.size.toLong()).toInt()
+                        val bytesRead = activePcmIn.read(skipBuffer, 0, toRead)
+                        if (bytesRead == -1) break
+                        remainingToSkip -= bytesRead
+                    } else {
+                        remainingToSkip -= skipped
+                    }
+                }
+                totalBytesRead = targetBytes - remainingToSkip
+                currentPositionAtomic.set((totalBytesRead / bytesPerMs).toLong())
+            }
+
             while (!isStopped.get()) {
                 if (isPaused) {
                     dataLine.stop()
                     while (isPaused && !isStopped.get()) {
+                        val seekTargetMs = pendingSeekMs.getAndSet(-1L)
+                        if (seekTargetMs >= 0) {
+                            applySeek(seekTargetMs)
+                        }
                         Thread.sleep(50)
                     }
                     if (!isStopped.get()) {
@@ -179,22 +224,7 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
                 // Seek handling
                 val seekTargetMs = pendingSeekMs.getAndSet(-1L)
                 if (seekTargetMs >= 0) {
-                    try {
-                        activePcmIn.close()
-                        audioIn?.close()
-                    } catch (_: Exception) {}
-
-                    val newAudioIn = AudioSystem.getAudioInputStream(file)
-                    audioIn = newAudioIn
-                    val newPcmIn = AudioSystem.getAudioInputStream(decodedFormat, newAudioIn)
-                    pcmIn = newPcmIn
-                    activePcmIn = newPcmIn
-                    dataLine.flush()
-
-                    val targetBytes = (seekTargetMs * bytesPerMs).toLong()
-                    activePcmIn.skip(targetBytes)
-                    totalBytesRead = targetBytes
-                    currentPositionAtomic.set(seekTargetMs)
+                    applySeek(seekTargetMs)
                 }
 
                 val bytesRead = activePcmIn.read(buffer, 0, buffer.size)

@@ -221,28 +221,49 @@ fun AudioPlayerBar(
                     }
                 }
 
-                // Middle Row: Slider & Timers
+                // Middle Row: Slider & Timers with smooth interactive scrubbing
+                var isDragging by remember { mutableStateOf(false) }
+                var dragFraction by remember { mutableStateOf(0f) }
+
+                LaunchedEffect(track) {
+                    isDragging = false
+                    dragFraction = 0f
+                }
+
+                val duration = if (player.durationMs > 0) player.durationMs else 1L
+                val playbackFraction = (player.currentPositionMs.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+                val sliderFraction = if (isDragging) dragFraction else playbackFraction
+
+                val displayPositionMs = if (isDragging) {
+                    (dragFraction * duration).toLong().coerceIn(0L, duration)
+                } else {
+                    player.currentPositionMs
+                }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        text = formatDuration(player.currentPositionMs),
+                        text = formatDuration(displayPositionMs),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.width(42.dp)
                     )
 
-                    val duration = if (player.durationMs > 0) player.durationMs else 1L
-                    val progress = (player.currentPositionMs.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
-
                     Slider(
-                        value = progress,
+                        value = sliderFraction,
                         onValueChange = { frac ->
-                            val targetMs = (frac * duration).toLong()
-                            player.seekTo(targetMs)
+                            isDragging = true
+                            dragFraction = frac
                         },
+                        onValueChangeFinished = {
+                            val targetMs = (dragFraction * duration).toLong().coerceIn(0L, duration)
+                            player.seekTo(targetMs)
+                            isDragging = false
+                        },
+                        enabled = player.durationMs > 0,
                         modifier = Modifier.weight(1f)
                     )
 
@@ -260,7 +281,7 @@ fun AudioPlayerBar(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Playback Controls
+                    // Playback Controls with skip buttons
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -273,11 +294,27 @@ fun AudioPlayerBar(
                             Text("⏮", fontSize = 14.sp)
                         }
 
+                        FilledTonalIconButton(
+                            onClick = { player.seekBackward(10_000L) },
+                            enabled = player.currentTrack != null,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Text("⏪10", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
+
                         FilledIconButton(
                             onClick = { player.togglePlayPause() },
                             modifier = Modifier.size(40.dp)
                         ) {
                             Text(if (player.isPlaying && !player.isPaused) "⏸" else "▶", fontSize = 16.sp)
+                        }
+
+                        FilledTonalIconButton(
+                            onClick = { player.seekForward(10_000L) },
+                            enabled = player.currentTrack != null,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Text("10⏩", fontSize = 10.sp, fontWeight = FontWeight.Bold)
                         }
 
                         FilledTonalIconButton(

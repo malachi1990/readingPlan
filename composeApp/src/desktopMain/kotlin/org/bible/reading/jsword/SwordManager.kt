@@ -25,6 +25,9 @@ import org.crosswire.jsword.passage.Key
 import org.crosswire.jsword.passage.NoSuchKeyException
 import org.crosswire.jsword.passage.Verse
 import org.crosswire.jsword.versification.BibleBook
+import org.jdom2.Content
+import org.jdom2.Element
+import org.jdom2.Text
 import java.io.File
 
 data class VerseItem(
@@ -546,10 +549,83 @@ class SwordManager(
     fun readKeyContent(book: Book, key: Key): String {
         return try {
             val data = BookData(book, key)
-            // Use getCanonicalText to exclude footnotes and cross-references from display
-            OSISUtil.getCanonicalText(data.osis).trim()
+            extractFormattedKeyContent(data.osis).trim()
         } catch (e: Exception) {
             "Error loading content: ${e.message}"
+        }
+    }
+
+    /**
+     * Extracts readable text content from an OSIS XML DOM while preserving:
+     * - Whitespace (tabs, newlines, carriage returns, indentation)
+     * - Line breaks (<lb/>)
+     * - Paragraph spacing (<p>)
+     * - Section headings (<title>)
+     * - Lists (<item>)
+     * - Tables (<row>, <cell>)
+     * while excluding non-canonical extra-biblical elements (<note>, <reference>).
+     */
+    private fun extractFormattedKeyContent(root: Element): String {
+        return try {
+            val sb = StringBuilder()
+            extractFormattedNode(root, sb)
+            val formatted = sb.toString().trim()
+            if (formatted.isNotEmpty()) formatted else OSISUtil.getCanonicalText(root).trim()
+        } catch (_: Exception) {
+            OSISUtil.getCanonicalText(root).trim()
+        }
+    }
+
+    private fun extractFormattedNode(content: Content, sb: StringBuilder) {
+        if (content is Text) {
+            sb.append(content.text)
+        } else if (content is Element) {
+            val name = content.name.lowercase()
+
+            // Exclude non-canonical extra-biblical notes and cross references
+            if (name == "note" || name == "reference") {
+                val canonical = content.getAttributeValue("canonical")
+                if (!canonical.toBoolean()) {
+                    return
+                }
+            }
+
+            if (name == "lb") {
+                if (sb.isEmpty() || sb.last() != '\n') {
+                    sb.append('\n')
+                }
+                return
+            }
+
+            val isBlock = name == "p" || name == "title" || name == "q" || name == "item" || name == "row"
+
+            if (isBlock && sb.isNotEmpty() && sb.last() != '\n') {
+                if (name == "p" || name == "title" || name == "q") {
+                    if (sb.length > 1 && sb[sb.length - 2] != '\n') {
+                        sb.append("\n\n")
+                    } else {
+                        sb.append("\n")
+                    }
+                } else {
+                    sb.append("\n")
+                }
+            }
+
+            for (child in content.content) {
+                extractFormattedNode(child, sb)
+            }
+
+            if (name == "cell") {
+                sb.append('\t')
+            }
+
+            if (isBlock && sb.isNotEmpty() && sb.last() != '\n') {
+                if (name == "p" || name == "title" || name == "q") {
+                    sb.append("\n\n")
+                } else {
+                    sb.append("\n")
+                }
+            }
         }
     }
 }

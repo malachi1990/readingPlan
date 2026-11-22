@@ -103,6 +103,74 @@ class EpubImportTest {
         return tempFile
     }
 
+    private fun createFormattingEpub(): File {
+        val tempFile = File.createTempFile("formatting_book", ".epub")
+        tempFile.deleteOnExit()
+
+        ZipOutputStream(FileOutputStream(tempFile)).use { zos ->
+            zos.putNextEntry(ZipEntry("mimetype"))
+            zos.write("application/epub+zip".toByteArray(Charsets.US_ASCII))
+            zos.closeEntry()
+
+            zos.putNextEntry(ZipEntry("META-INF/container.xml"))
+            val containerXml = """<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+    <rootfiles>
+        <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+    </rootfiles>
+</container>""".trimIndent()
+            zos.write(containerXml.toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+
+            zos.putNextEntry(ZipEntry("OEBPS/content.opf"))
+            val opfContent = """<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Whitespace Test Book</dc:title>
+    <dc:creator>Formatting Author</dc:creator>
+    <dc:language>en</dc:language>
+    <dc:description>Testing whitespace and formatting preservation</dc:description>
+    <dc:identifier id="BookId">urn:uuid:ws-test-12345</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="c1"/>
+  </spine>
+</package>""".trimIndent()
+            zos.write(opfContent.toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+
+            zos.putNextEntry(ZipEntry("OEBPS/ch1.xhtml"))
+            // Chapter with tabs (\t), newlines (\n), carriage returns (\r\n and \r),
+            // preformatted text, <br class="calibre"/>, paragraph breaks, and whitespace entities
+            val ch1Content = "<!DOCTYPE html>\n" +
+                "<html xmlns=\"http://www.w3.org/1999/xhtml\">\n" +
+                "<head><title>Chapter 1: Formatted Content</title></head>\n" +
+                "<body>\n" +
+                "  <h1>Chapter 1: Formatted Content</h1>\n" +
+                "  <p>First paragraph with\ttab character and\r\ncarriage return line feed.</p>\n" +
+                "  <p>Line with break<br class=\"calibre\"/>followed by second line<br/>and third line.</p>\n" +
+                "  <pre>\n" +
+                "\tindented code line 1\r\n" +
+                "\t\tdoubly indented line 2\n" +
+                "\tindented code line 3\n" +
+                "  </pre>\n" +
+                "  <p>Entities test: non-breaking&nbsp;space and em-space&emsp;and en-space&ensp;and tab&tab;done.</p>\n" +
+                "  <ul>\n" +
+                "    <li>First item</li>\n" +
+                "    <li>Second item</li>\n" +
+                "  </ul>\n" +
+                "</body>\n" +
+                "</html>"
+            zos.write(ch1Content.toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+        }
+
+        return tempFile
+    }
+
     @Test
     fun testBookImportRegistry() {
         val epubFile = createSyntheticEpub()
@@ -154,11 +222,12 @@ class EpubImportTest {
         )
 
         val osisSection = OsisConverter.toOsisSection(chapter)
-        assertTrue(osisSection.contains("<title level=\"1\">Section Title</title>"))
+        assertTrue(osisSection.contains("<title canonical=\"true\" level=\"1\">Section Title</title>"))
         assertTrue(osisSection.contains("""<hi type="bold">bold text</hi>"""))
         assertTrue(osisSection.contains("""<hi type="italic">italic text</hi>"""))
         assertTrue(osisSection.contains("""<hi type="underline">underlined text</hi>"""))
-        assertTrue(osisSection.contains("""<q type="block">Here is a profound quote.</q>"""))
+        assertTrue(osisSection.contains("<q type=\"block\">"))
+        assertTrue(osisSection.contains("Here is a profound quote."))
         assertTrue(osisSection.contains("""<note type="explanation">Important detail</note>"""))
 
         // Test full OSIS document generation
@@ -188,6 +257,83 @@ class EpubImportTest {
         assertTrue(fullOsis.contains("<creator role=\"aut\">Author Name</creator>"))
         assertTrue(fullOsis.contains("<div type=\"book\">"))
         assertTrue(fullOsis.contains("<div type=\"section\" osisID=\"ch1\">"))
+    }
+
+    @Test
+    fun testPreserveWhitespaceAndFormattingInOsisConverter() {
+        // Test tabs, newlines, carriage returns, <pre>, <br with attributes>, lists, and entities
+        val rawHtml = "<pre>\tdef foo():\r\n\t\treturn 42\n</pre>\n" +
+            "<p>Paragraph with\ttab and\r\ncarriage return.</p>\n" +
+            "<p>Line 1<br class=\"calibre4\"/>Line 2<br style=\"margin:0\"/>Line 3</p>\n" +
+            "<p>Spacing: a&emsp;b&ensp;c&tab;d&NewLine;e</p>"
+
+        val chapter = ImportedChapter(
+            id = "c1",
+            title = "Formatting Chapter",
+            rawContent = rawHtml,
+            order = 1
+        )
+
+        val osisSection = OsisConverter.toOsisSection(chapter)
+
+        // 1. Title has canonical="true" and newline separation
+        assertTrue(osisSection.contains("<title canonical=\"true\" level=\"1\">Formatting Chapter</title>"))
+
+        // 2. Tabs preserved
+        assertTrue(osisSection.contains("\tdef foo():") || osisSection.contains("&#9;def foo():"))
+        assertTrue(osisSection.contains("Paragraph with\ttab"))
+
+        // 3. Carriage returns preserved (encoded as &#13; so W3C XML parsers don't normalize them to \n)
+        assertTrue(osisSection.contains("&#13;"))
+
+        // 4. <br class="calibre4"/> preserved as <lb/>\n
+        assertTrue(osisSection.contains("<lb/>\nLine 2") || osisSection.contains("<lb/>"))
+
+        // 5. Preformatted text preserved in <p>
+        assertTrue(osisSection.contains("return 42"))
+
+        // 6. Entities converted to whitespace / XML characters
+        assertTrue(!osisSection.contains("&amp;emsp;"), "Entities should not be double-escaped")
+        assertTrue(osisSection.contains("&#8195;"), "Em-space should be converted to &#8195;")
+        assertTrue(osisSection.contains("&#8194;"), "En-space should be converted to &#8194;")
+    }
+
+    @Test
+    fun testEndToEndWhitespaceAndFormattingPreservation() = runBlocking {
+        val epub = createFormattingEpub()
+        val tempSwordDir = Files.createTempDirectory("sword_formatting_app_dir").toFile()
+        tempSwordDir.deleteOnExit()
+
+        val manager = SwordManager(appDir = tempSwordDir)
+        val result = manager.importBook(epub)
+
+        assertTrue(result.isSuccess, "Import of formatted EPUB should succeed: ${result.exceptionOrNull()?.message}")
+        val book = result.getOrThrow()
+
+        val keys = manager.getBookKeys(book)
+        assertTrue(keys.isNotEmpty(), "Module should have keys")
+        val ch1Key = keys.first()
+
+        val content = manager.readKeyContent(book, ch1Key)
+
+        // 1. Verify title is present
+        assertTrue(content.contains("Chapter 1: Formatted Content"), "Content must preserve chapter title")
+
+        // 2. Verify tabs (\t) are preserved
+        assertTrue(content.contains("\ttab character") || content.contains("\t"), "Content must preserve tabs")
+        assertTrue(content.contains("\tindented code line 1"), "Content must preserve tabs in preformatted blocks")
+
+        // 3. Verify newlines (\n) are preserved between paragraphs and lines
+        assertTrue(content.contains("\n"), "Content must preserve newlines")
+        assertTrue(content.contains("followed by second line\nand third line") || content.contains("Line with break\n"),
+            "Content must preserve line breaks (<br/>)")
+
+        // 4. Verify carriage returns (\r) are preserved
+        assertTrue(content.contains("\r"), "Content must preserve carriage returns (\\r)")
+
+        // 5. Verify lists are formatted with items on separate lines
+        assertTrue(content.contains("First item"), "Content must preserve list item 1")
+        assertTrue(content.contains("Second item"), "Content must preserve list item 2")
     }
 
     @Test
@@ -268,6 +414,46 @@ class EpubImportTest {
     }
 
     @Test
+    fun testBatchImportMultipleBooks() = runBlocking {
+        val epub1 = createSyntheticEpub(title = "Multi Book Volume One", author = "Author One")
+        val epub2 = createSyntheticEpub(title = "Multi Book Volume Two", author = "Author Two")
+
+        val tempSwordDir = Files.createTempDirectory("sword_batch_e2e_app_dir").toFile()
+        tempSwordDir.deleteOnExit()
+
+        val manager = SwordManager(appDir = tempSwordDir)
+        val progressUpdates = mutableListOf<String>()
+
+        val results = manager.importBooks(listOf(epub1, epub2)) { fileIdx, total, file, step ->
+            progressUpdates.add("$fileIdx/$total - ${file.name}: $step")
+        }
+
+        assertEquals(2, results.size, "Should return results for 2 files")
+        assertTrue(results.all { it.isSuccess }, "All imports in batch should succeed")
+        assertTrue(progressUpdates.isNotEmpty(), "Progress updates should have been reported")
+
+        val book1 = results[0].getOrThrow()
+        val book2 = results[1].getOrThrow()
+
+        assertTrue(book1.initials.isNotBlank())
+        assertTrue(book2.initials.isNotBlank())
+        assertTrue(
+            book1.initials != book2.initials,
+            "Module initials should be distinct: ${book1.initials} vs ${book2.initials}"
+        )
+
+        // Both books should be in manager.installedBooks
+        assertTrue(manager.installedBooks.any { it.initials.equals(book1.initials, ignoreCase = true) })
+        assertTrue(manager.installedBooks.any { it.initials.equals(book2.initials, ignoreCase = true) })
+
+        // Check content of both
+        val keys1 = manager.getBookKeys(book1)
+        val keys2 = manager.getBookKeys(book2)
+        assertTrue(keys1.isNotEmpty())
+        assertTrue(keys2.isNotEmpty())
+    }
+
+    @Test
     fun testInspectCalvinEpub() = runBlocking {
         val calvinFile = File("/media/nvmd1/books/theology/Sermons on Ephesians - John Calvin.epub")
         if (!calvinFile.exists()) return@runBlocking
@@ -291,74 +477,6 @@ class EpubImportTest {
         println("Total keys returned: " + keys.size)
         for (k in keys) {
             println("  Key name: " + k.name)
-        }
-
-
-        @Test
-        fun testBatchImportMultipleBooks() = runBlocking {
-            val epub1 = createSyntheticEpub(title = "Multi Book Volume One", author = "Author One")
-            val epub2 = createSyntheticEpub(title = "Multi Book Volume Two", author = "Author Two")
-
-            val tempSwordDir = Files.createTempDirectory("sword_batch_e2e_app_dir").toFile()
-            tempSwordDir.deleteOnExit()
-
-            val manager = SwordManager(appDir = tempSwordDir)
-            val progressUpdates = mutableListOf<String>()
-
-            val results = manager.importBooks(listOf(epub1, epub2)) { fileIdx, total, file, step ->
-                progressUpdates.add("$fileIdx/$total - ${file.name}: $step")
-            }
-
-            assertEquals(2, results.size, "Should return results for 2 files")
-            assertTrue(results.all { it.isSuccess }, "All imports in batch should succeed")
-            assertTrue(progressUpdates.isNotEmpty(), "Progress updates should have been reported")
-
-            val book1 = results[0].getOrThrow()
-            val book2 = results[1].getOrThrow()
-
-            assertTrue(book1.initials.isNotBlank())
-            assertTrue(book2.initials.isNotBlank())
-            assertTrue(
-                book1.initials != book2.initials,
-                "Module initials should be distinct: ${book1.initials} vs ${book2.initials}"
-            )
-
-            // Both books should be in manager.installedBooks
-            assertTrue(manager.installedBooks.any { it.initials.equals(book1.initials, ignoreCase = true) })
-            assertTrue(manager.installedBooks.any { it.initials.equals(book2.initials, ignoreCase = true) })
-
-            // Check content of both
-            val keys1 = manager.getBookKeys(book1)
-            val keys2 = manager.getBookKeys(book2)
-            assertTrue(keys1.isNotEmpty())
-            assertTrue(keys2.isNotEmpty())
-        }
-
-        @Test
-        fun testInspectCalvinEpub() = runBlocking {
-            val calvinFile = File("/media/nvmd1/books/theology/Sermons on Ephesians - John Calvin.epub")
-            if (!calvinFile.exists()) return@runBlocking
-
-            val imported = EpubReader.parse(calvinFile)
-            println("=== Imported Book Chapters ===")
-            println("Total parsed chapters: " + imported.chapters.size)
-            for (ch in imported.chapters) {
-                println("  Chapter id: " + ch.id + " | title: " + ch.title + " | length: " + ch.rawContent.length)
-            }
-
-            val tempSwordDir = Files.createTempDirectory("sword_calvin_test").toFile()
-            tempSwordDir.deleteOnExit()
-            val manager = SwordManager(appDir = tempSwordDir)
-            val result = manager.importBook(calvinFile)
-            assertTrue(result.isSuccess)
-            val book = result.getOrThrow()
-
-            val keys = manager.getBookKeys(book)
-            println("=== JSword Keys for Module " + book.initials + " ===")
-            println("Total keys returned: " + keys.size)
-            for (k in keys) {
-                println("  Key name: " + k.name)
-            }
         }
     }
 }
