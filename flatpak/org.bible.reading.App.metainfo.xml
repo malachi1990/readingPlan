@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.bible.reading.App</id>
+  <name>Bible Reading Plan Generator</name>
+  <summary>Bible reading plan generator, SWORD study reader, Audio Bible player, and neural TTS</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      Desktop application for generating customizable Bible reading plans, reading and importing
+      SWORD modules (Bibles, commentaries, dictionaries, general books from EPUB and PDF),
+      playing Audio Bibles with variable playback speed, and synthesizing speech with neural TTS.
+    </p>
+  </description>
+  <launchable type="desktop-id">org.bible.reading.App.desktop</launchable>
+  <provides>
+    <binary>org.bible.reading</binary>
+  </provides>
+  <releases>
+    <release version="1.0.0" date="2026-11-23"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Bible Reading Plan Generator
+Comment=Generate Bible reading plans, study SWORD modules, and listen to Audio Bible and TTS
+Exec=org.bible.reading
+Icon=org.bible.reading.App
+Terminal=false
+Categories=Education;Literature;Utility;
+StartupWMClass=org-bible-reading-MainKt

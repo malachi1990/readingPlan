@@ -1,0 +1,33 @@
+id: org.bible.reading.App
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: org.bible.reading
+finish-args:
+  - --share=ipc
+  - --socket=x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --share=network
+  - --device=dri
+  - --filesystem=home
+modules:
+  - name: readingPlan
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/lib/org.bible.reading /app/bin
+      - cp -r app/org.bible.reading/* /app/lib/org.bible.reading/
+      - ln -sf /app/lib/org.bible.reading/bin/org.bible.reading /app/bin/org.bible.reading
+      - install -Dm644 org.bible.reading.App.desktop /app/share/applications/org.bible.reading.App.desktop
+      - install -Dm644 org.bible.reading.App.metainfo.xml /app/share/metainfo/org.bible.reading.App.metainfo.xml
+      - install -Dm644 org.bible.reading.App.svg /app/share/icons/hicolor/scalable/apps/org.bible.reading.App.svg
+    sources:
+      - type: dir
+        path: ../composeApp/build/compose/binaries/main
+        dest: .
+      - type: file
+        path: org.bible.reading.App.desktop
+      - type: file
+        path: org.bible.reading.App.metainfo.xml
+      - type: file
+        path: org.bible.reading.App.svg

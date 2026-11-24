@@ -45,7 +45,7 @@ jobs:
 
   package-macos-arm64-dmg:
     name: macOS arm64 (.dmg)
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
