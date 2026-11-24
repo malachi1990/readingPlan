@@ -21,7 +21,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.bible.reading.jsword.ChapterPassage
 import org.bible.reading.jsword.ModuleBook
 import org.bible.reading.jsword.SwordManager
@@ -78,11 +80,18 @@ fun FurtherStudyView(
         }
     }
 
+    // Honor external requests to open a specific module (e.g. from ImportQueueDialog)
+    LaunchedEffect(manager.pendingStudyModule) {
+        val target = manager.pendingStudyModule ?: return@LaunchedEffect
+        selectedModule = target
+        if (target.bookCategory == BookCategory.GENERAL_BOOK) {
+            categoryTab = ModuleCategoryTab.GENERAL_BOOKS
+        }
+        manager.pendingStudyModule = null
+    }
+
     // Module info dialog state
     var showModuleInfoDialog by remember { mutableStateOf(false) }
-
-    // Import file dialog state
-    var importingFiles by remember { mutableStateOf<List<File>?>(null) }
 
     // Notes repository (disk-backed, shared for the lifetime of the view)
     val notesRepository = remember { NotesRepository(manager.appDir) }
@@ -104,17 +113,25 @@ fun FurtherStudyView(
             (selectedModule?.bookCategory == BookCategory.COMMENTARY && selectedModule is AbstractPassageBook) ||
             (selectedModule?.bookCategory == BookCategory.DAILY_DEVOTIONS && selectedModule is AbstractPassageBook)
 
-    // Module TOC: list of books for verse-based modules, sourced from the module's versification.
+    // Module TOC: list of books with populated content for verse-based modules.
     // Recomputed whenever the selected module changes.
     var moduleBooks by remember(selectedModule) {
         mutableStateOf<List<ModuleBook>>(emptyList())
     }
+    var isLoadingModuleBooks by remember(selectedModule) {
+        mutableStateOf(selectedModule != null && isVerseBasedModule)
+    }
     LaunchedEffect(selectedModule) {
         val mod = selectedModule
-        moduleBooks = if (mod != null && isVerseBasedModule) {
-            manager.getModuleBooks(mod).ifEmpty { emptyList() }
+        if (mod != null && isVerseBasedModule) {
+            isLoadingModuleBooks = true
+            moduleBooks = withContext(Dispatchers.IO) {
+                manager.getModuleBooks(mod)
+            }
+            isLoadingModuleBooks = false
         } else {
-            emptyList()
+            isLoadingModuleBooks = false
+            moduleBooks = emptyList()
         }
     }
 
@@ -126,11 +143,12 @@ fun FurtherStudyView(
 
     val currentModuleBook: ModuleBook? = moduleBooks.getOrNull(currentBookIndex)
 
-    // Clamp currentChapter to valid range whenever the book changes
+    // Snap currentChapter to a populated chapter whenever the book changes
     LaunchedEffect(currentModuleBook) {
-        val maxCh = currentModuleBook?.chapterCount ?: 1
-        if (currentChapter > maxCh) currentChapter = maxCh
-        if (currentChapter < 1) currentChapter = 1
+        val mb = currentModuleBook ?: return@LaunchedEffect
+        if (currentChapter !in mb.chapters) {
+            currentChapter = mb.chapters.firstOrNull() ?: 1
+        }
     }
 
     // Quick reference jump
@@ -169,22 +187,27 @@ fun FurtherStudyView(
 
     // Navigation helpers operating on moduleBooks list
     fun stepToPrevChapter() {
-        if (currentChapter > 1) {
-            currentChapter -= 1
+        val mb = currentModuleBook ?: return
+        val chIdx = mb.chapters.indexOf(currentChapter)
+        if (chIdx > 0) {
+            currentChapter = mb.chapters[chIdx - 1]
         } else if (currentBookIndex > 0) {
             currentBookIndex -= 1
-            currentChapter = moduleBooks.getOrNull(currentBookIndex)?.chapterCount ?: 1
+            currentChapter = moduleBooks.getOrNull(currentBookIndex)?.chapters?.lastOrNull() ?: 1
         }
         selectedVerseFilter = 0
     }
 
     fun stepToNextChapter() {
-        val maxCh = currentModuleBook?.chapterCount ?: 1
-        if (currentChapter < maxCh) {
-            currentChapter += 1
+        val mb = currentModuleBook ?: return
+        val chIdx = mb.chapters.indexOf(currentChapter)
+        if (chIdx >= 0 && chIdx < mb.chapters.lastIndex) {
+            currentChapter = mb.chapters[chIdx + 1]
+        } else if (chIdx < 0 && mb.chapters.any { it > currentChapter }) {
+            currentChapter = mb.chapters.first { it > currentChapter }
         } else if (currentBookIndex < moduleBooks.lastIndex) {
             currentBookIndex += 1
-            currentChapter = 1
+            currentChapter = moduleBooks.getOrNull(currentBookIndex)?.chapters?.firstOrNull() ?: 1
         }
         selectedVerseFilter = 0
     }
@@ -438,15 +461,6 @@ fun FurtherStudyView(
                             }
                         }
 
-                        // Voice Settings Button
-                        OutlinedButton(
-                            onClick = onOpenTtsSettings,
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            modifier = Modifier.height(34.dp)
-                        ) {
-                            Text("🔊 Voice", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        }
-
                         // Notes Mode Toggle — available for all module types
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -481,10 +495,17 @@ fun FurtherStudyView(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
+                            val canStepPrev = currentBookIndex > 0 ||
+                                (currentModuleBook?.chapters?.indexOf(currentChapter) ?: 0) > 0
+                            val canStepNext = currentBookIndex < moduleBooks.lastIndex ||
+                                (currentModuleBook?.let { mb ->
+                                    val idx = mb.chapters.indexOf(currentChapter)
+                                    (idx >= 0 && idx < mb.chapters.lastIndex) || currentChapter < (mb.chapters.lastOrNull() ?: mb.chapterCount)
+                                } ?: false)
                             // Previous Chapter Button
                             OutlinedButton(
                                 onClick = { stepToPrevChapter() },
-                                enabled = currentBookIndex > 0 || currentChapter > 1,
+                                enabled = canStepPrev,
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                                 modifier = Modifier.height(34.dp)
                             ) {
@@ -524,7 +545,7 @@ fun FurtherStudyView(
                                                         )
                                                         Spacer(Modifier.width(16.dp))
                                                         Text(
-                                                            text = "${mb.chapterCount} ch",
+                                                            text = "${mb.chapters.size} ch",
                                                             style = MaterialTheme.typography.labelSmall,
                                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                                         )
@@ -532,7 +553,7 @@ fun FurtherStudyView(
                                                 },
                                                 onClick = {
                                                     currentBookIndex = idx
-                                                    currentChapter = 1
+                                                    currentChapter = mb.chapters.firstOrNull() ?: 1
                                                     selectedVerseFilter = 0
                                                     bookMenuExpanded = false
                                                 }
@@ -547,7 +568,7 @@ fun FurtherStudyView(
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     OutlinedButton(
                                         onClick = { stepToPrevChapter() },
-                                        enabled = currentChapter > 1 || currentBookIndex > 0,
+                                        enabled = canStepPrev,
                                         contentPadding = PaddingValues(0.dp),
                                         modifier = Modifier.size(34.dp)
                                     ) {
@@ -568,7 +589,7 @@ fun FurtherStudyView(
                                             expanded = chapterMenuExpanded,
                                             onDismissRequest = { chapterMenuExpanded = false }
                                         ) {
-                                            (1..currentModuleBook.chapterCount).forEach { ch ->
+                                            currentModuleBook.chapters.forEach { ch ->
                                                 DropdownMenuItem(
                                                     text = {
                                                         Text(
@@ -588,7 +609,7 @@ fun FurtherStudyView(
 
                                     OutlinedButton(
                                         onClick = { stepToNextChapter() },
-                                        enabled = currentChapter < currentModuleBook.chapterCount || currentBookIndex < moduleBooks.lastIndex,
+                                        enabled = canStepNext,
                                         contentPadding = PaddingValues(0.dp),
                                         modifier = Modifier.size(34.dp)
                                     ) {
@@ -600,7 +621,7 @@ fun FurtherStudyView(
                             // Next Chapter Button
                             OutlinedButton(
                                 onClick = { stepToNextChapter() },
-                                enabled = currentBookIndex < moduleBooks.lastIndex || currentChapter < (currentModuleBook?.chapterCount ?: 1),
+                                enabled = canStepNext,
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                                 modifier = Modifier.height(34.dp)
                             ) {
@@ -619,11 +640,14 @@ fun FurtherStudyView(
                                     quickRefInput = it
                                     quickRefError = null
                                 },
-                                placeholder = { Text("Jump to ref: e.g. Rom 8:28, John 3", fontSize = 12.sp) },
+                                placeholder = {
+                                    Text(
+                                        text = "Jump to ref: e.g. Rom 8:28, John 3",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                },
                                 singleLine = true,
-                                modifier = Modifier
-                                    .width(260.dp)
-                                    .height(48.dp),
+                                modifier = Modifier.width(260.dp),
                                 textStyle = MaterialTheme.typography.bodySmall
                             )
 
@@ -940,9 +964,18 @@ fun FurtherStudyView(
                     // Verse-based Module Reading Surface (Supports Single or Parallel comparison)
 
                     // Loading state while moduleBooks is still being fetched
-                    if (moduleBooks.isEmpty()) {
+                    if (isLoadingModuleBooks) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             CircularProgressIndicator()
+                        }
+                    } else if (moduleBooks.isEmpty()) {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text(
+                                text = "This module contains no readable chapters.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(24.dp)
+                            )
                         }
                     } else {
                         val primaryPassage = remember(selectedModule, currentModuleBook, currentChapter) {
@@ -1398,19 +1431,6 @@ fun FurtherStudyView(
             book = selectedModule!!,
             manager = manager,
             onDismiss = { showModuleInfoDialog = false }
-        )
-    }
-
-    // Import Book Dialog
-    if (!importingFiles.isNullOrEmpty()) {
-        ImportBookDialog(
-            selectedFiles = importingFiles!!,
-            manager = manager,
-            onDismiss = { importingFiles = null },
-            onImportSuccess = { book ->
-                selectedModule = book
-                categoryTab = ModuleCategoryTab.GENERAL_BOOKS
-            }
         )
     }
 }
@@ -1926,7 +1946,13 @@ private fun parseQuickReference(input: String, moduleBooks: List<ModuleBook>): T
     if (bookIndex < 0) return null
 
     val mb = moduleBooks[bookIndex]
-    val chapter = chapterStr?.toIntOrNull()?.coerceIn(1, mb.chapterCount) ?: 1
+    val requestedChapter = chapterStr?.toIntOrNull()
+    val chapter = when {
+        requestedChapter == null -> mb.chapters.firstOrNull() ?: 1
+        requestedChapter in mb.chapters -> requestedChapter
+        else -> mb.chapters.minByOrNull { kotlin.math.abs(it - requestedChapter) }
+            ?: requestedChapter.coerceIn(1, mb.chapterCount)
+    }
     val verse = verseStr?.toIntOrNull() ?: 0
 
     return Triple(bookIndex, chapter, verse)

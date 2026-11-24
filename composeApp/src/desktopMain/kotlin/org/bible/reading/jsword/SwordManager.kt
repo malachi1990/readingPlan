@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.bible.reading.dto.Reading
+import org.bible.reading.importer.service.ImportQueueItem
 import org.bible.reading.importer.service.BookImportService
 import org.crosswire.jsword.book.Book
 import org.crosswire.jsword.book.BookCategory
@@ -23,6 +24,8 @@ import org.crosswire.jsword.book.sword.SwordBookMetaData
 import org.crosswire.jsword.book.sword.SwordBookPath
 import org.crosswire.jsword.passage.Key
 import org.crosswire.jsword.passage.NoSuchKeyException
+import org.crosswire.jsword.passage.Passage
+import org.crosswire.jsword.passage.RestrictionType
 import org.crosswire.jsword.passage.Verse
 import org.crosswire.jsword.versification.BibleBook
 import org.jdom2.Content
@@ -53,7 +56,9 @@ data class ModuleBook(
     /** Display name as reported by JSword's BibleNames for this module's versification */
     val displayName: String,
     /** Number of chapters in this book, per the module's versification */
-    val chapterCount: Int
+    val chapterCount: Int,
+    /** Sorted list of populated chapter numbers actually present in this module */
+    val chapters: List<Int> = (1..chapterCount).toList()
 )
 
 class SwordManager(
@@ -66,6 +71,7 @@ class SwordManager(
 
     private val installManager = InstallManager()
     val importService by lazy { BookImportService(this) }
+    private val moduleBooksCache = mutableMapOf<String, List<ModuleBook>>()
 
     // Observable list of installed books
     val installedBooks = mutableStateListOf<Book>()
@@ -73,6 +79,9 @@ class SwordManager(
 
     // Currently selected Bible for reading
     var selectedBible by mutableStateOf<Book?>(null)
+
+    // Optional book requested to be opened in Further Study (e.g. from Import Queue)
+    var pendingStudyModule by mutableStateOf<Book?>(null)
 
     // Download / installer state
     val availableInstallers = mutableStateListOf<String>()
@@ -120,6 +129,9 @@ class SwordManager(
     fun refreshInstalledBooks() {
         configureBookPath()
 
+        synchronized(moduleBooksCache) {
+            moduleBooksCache.clear()
+        }
         installedBooks.clear()
         installedBibles.clear()
 
@@ -279,6 +291,14 @@ class SwordManager(
         return importService.importFiles(files, onProgress)
     }
 
+    fun enqueueBookImports(files: List<File>): List<ImportQueueItem> {
+        return importService.enqueueFiles(files)
+    }
+
+    fun enqueueBookImport(file: File): ImportQueueItem? {
+        return importService.enqueueFile(file)
+    }
+
     /**
      * Convenience method specifically for importing EPUB files.
      */
@@ -302,16 +322,46 @@ class SwordManager(
     }
 
     /**
-     * Returns the ordered list of books (with chapter counts) present in a verse-based
-     * Sword module, sourced from the module's own versification system.
+     * Returns the ordered list of books (with populated chapters) actually present in a
+     * verse-based Sword module, filtered using the module's indexed keys so books/chapters
+     * with no content are omitted from the table of contents.
      *
      * Skips intro pseudo-books (INTRO_BIBLE, INTRO_OT, INTRO_NT) that have no readable
      * content. Falls back to an empty list if the module is not a passage-based book.
      */
     fun getModuleBooks(book: Book): List<ModuleBook> {
         val passageBook = book as? AbstractPassageBook ?: return emptyList()
+        val cacheKey = "${book.initials}:${book.bookMetaData?.location ?: ""}"
+        synchronized(moduleBooksCache) {
+            moduleBooksCache[cacheKey]?.let { return it }
+        }
         return try {
             val v11n = passageBook.versification ?: return emptyList()
+            val chaptersByBook: Map<BibleBook, List<Int>>? = try {
+                val globalKeys = passageBook.globalKeyList
+                val grouped = mutableMapOf<BibleBook, LinkedHashSet<Int>>()
+                if (globalKeys is Passage) {
+                    val rangeIter = globalKeys.rangeIterator(RestrictionType.CHAPTER)
+                    while (rangeIter.hasNext()) {
+                        val range = rangeIter.next()
+                        val bb = range.start.book
+                        val ch = range.start.chapter
+                        if (ch >= 1) {
+                            grouped.getOrPut(bb) { LinkedHashSet() }.add(ch)
+                        }
+                    }
+                } else if (globalKeys != null) {
+                    for (k in globalKeys) {
+                        if (k is Verse && k.chapter >= 1) {
+                            grouped.getOrPut(k.book) { LinkedHashSet() }.add(k.chapter)
+                        }
+                    }
+                }
+                grouped.mapValues { (_, chapters) -> chapters.sorted() }
+            } catch (_: Exception) {
+                null
+            }
+
             val result = mutableListOf<ModuleBook>()
             val bookIter = v11n.bookIterator
             while (bookIter.hasNext()) {
@@ -320,12 +370,31 @@ class SwordManager(
                 if (bb == BibleBook.INTRO_BIBLE || bb == BibleBook.INTRO_OT || bb == BibleBook.INTRO_NT) continue
                 val chapterCount = v11n.getLastChapter(bb)
                 if (chapterCount < 1) continue
+
+                val populatedChapters = if (chaptersByBook != null) {
+                    val found = chaptersByBook[bb]
+                    if (found.isNullOrEmpty()) continue
+                    found
+                } else {
+                    val hasContent = try {
+                        passageBook.contains(Verse(v11n, bb, 1, 1)) ||
+                            passageBook.contains(Verse(v11n, bb, 1, 2))
+                    } catch (_: Exception) {
+                        true
+                    }
+                    if (!hasContent) continue
+                    (1..chapterCount).toList()
+                }
+
                 val displayName = try {
                     v11n.getBookName(bb)?.longName ?: bb.osis
                 } catch (_: Exception) {
                     bb.osis
                 }
-                result.add(ModuleBook(bb, displayName, chapterCount))
+                result.add(ModuleBook(bb, displayName, chapterCount, populatedChapters))
+            }
+            synchronized(moduleBooksCache) {
+                moduleBooksCache[cacheKey] = result
             }
             result
         } catch (_: Exception) {

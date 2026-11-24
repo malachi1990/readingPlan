@@ -6,6 +6,7 @@ import org.bible.reading.importer.epub.EpubReader
 import org.bible.reading.importer.model.ImportedBook
 import org.bible.reading.importer.model.ImportedBookMetadata
 import org.bible.reading.importer.model.ImportedChapter
+import org.bible.reading.importer.service.ImportItemStatus
 import org.bible.reading.importer.osis.OsisConverter
 import org.bible.reading.importer.sword.SwordGenBookWriter
 import org.bible.reading.jsword.SwordManager
@@ -625,5 +626,79 @@ class EpubImportTest {
                 "Section '${k.name}' should not have multiple consecutive blank lines"
             )
         }
+    }
+
+    @Test
+    fun testBackgroundImportQueueProcessesAndDeduplicates() = runBlocking {
+        val epub1 = createSyntheticEpub(title = "Queue Volume One", author = "Author One")
+        val epub2 = createSyntheticEpub(title = "Queue Volume Two", author = "Author Two")
+        val epub3 = createSyntheticEpub(title = "Queue Volume Three", author = "Author Three")
+        val missingFile = File(Files.createTempDirectory("missing_queue_dir").toFile().apply { deleteOnExit() }, "missing.epub")
+
+        val tempSwordDir = Files.createTempDirectory("sword_queue_test_dir").toFile()
+        tempSwordDir.deleteOnExit()
+
+        val manager = SwordManager(appDir = tempSwordDir)
+        val service = manager.importService
+
+        val firstBatch = manager.enqueueBookImports(listOf(epub1, missingFile, epub2))
+        assertEquals(3, firstBatch.size)
+
+        // Re-enqueuing an active file should be ignored while pending/in-progress
+        val duplicate = manager.enqueueBookImport(epub2)
+        assertEquals(null, duplicate)
+
+        // Enqueue an additional book while background worker is active
+        val appended = manager.enqueueBookImport(epub3)
+        assertNotNull(appended)
+
+        service.awaitIdle()
+
+        assertFalse(service.isProcessing, "Worker should be idle after awaiting completion")
+        assertEquals(4, service.queueItems.size)
+
+        val successItems = service.queueItems.filter { it.status is ImportItemStatus.Success }
+        val failedItems = service.queueItems.filter { it.status is ImportItemStatus.Failed }
+        assertEquals(3, successItems.size)
+        assertEquals(1, failedItems.size)
+        assertEquals(missingFile, failedItems.first().file)
+
+        val importedInitials = successItems.map { (it.status as ImportItemStatus.Success).book.initials }
+        assertEquals(3, importedInitials.toSet().size)
+        importedInitials.forEach { initials ->
+            assertTrue(manager.installedBooks.any { it.initials.equals(initials, ignoreCase = true) })
+        }
+
+        assertTrue(service.removeItem(failedItems.first().id))
+        assertEquals(3, service.queueItems.size)
+
+        service.clearFinished()
+        assertTrue(service.queueItems.isEmpty())
+    }
+
+    @Test
+    fun testRetryFailedQueueItem() = runBlocking {
+        val tempDir = Files.createTempDirectory("sword_queue_retry_dir").toFile().apply { deleteOnExit() }
+        val targetFile = File(tempDir, "retry_target.epub")
+        // Initially missing -> should fail
+        val manager = SwordManager(appDir = Files.createTempDirectory("sword_retry_app_dir").toFile().apply { deleteOnExit() })
+        val service = manager.importService
+
+        val item = manager.enqueueBookImport(targetFile)
+        assertNotNull(item)
+        service.awaitIdle()
+
+        assertTrue(service.queueItems.single().status is ImportItemStatus.Failed)
+
+        // Populate valid EPUB at targetFile and retry
+        val validEpub = createSyntheticEpub(title = "Retried Queue Book", author = "Retry Author")
+        validEpub.copyTo(targetFile, overwrite = true)
+
+        assertTrue(service.retryItem(item.id))
+        service.awaitIdle()
+
+        val finalStatus = service.queueItems.single().status
+        assertTrue(finalStatus is ImportItemStatus.Success, "Retried item should succeed")
+        assertEquals("Retried Queue Book", (finalStatus as ImportItemStatus.Success).book.name)
     }
 }

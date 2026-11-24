@@ -450,7 +450,6 @@ private fun BrowseAndDownloadContent(
 private fun InstalledBooksContent(manager: SwordManager) {
     val coroutineScope = rememberCoroutineScope()
     var locationFilter by remember { mutableStateOf(LocationFilter.ALL) }
-    var importingFile by remember { mutableStateOf<File?>(null) }
 
     val appBooks = remember(manager.installedBooks.toList()) {
         manager.installedBooks.filter { manager.isAppDirectoryBook(it) }
@@ -489,7 +488,10 @@ private fun InstalledBooksContent(manager: SwordManager) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedButton(
                     onClick = {
-                        openBookFileChooser { importingFile = it }
+                        openBooksFileChooser { files ->
+                            manager.enqueueBookImports(files)
+                            manager.importService.isQueueDialogOpen = true
+                        }
                     }
                 ) {
                     Text("📥 Import Book")
@@ -653,15 +655,6 @@ private fun InstalledBooksContent(manager: SwordManager) {
                     }
                 }
             }
-        }
-
-        if (importingFile != null) {
-            ImportBookDialog(
-                selectedFile = importingFile!!,
-                manager = manager,
-                onDismiss = { importingFile = null },
-                onImportSuccess = {}
-            )
         }
     }
 }

@@ -1,6 +1,18 @@
 package org.bible.reading.ui
 
 import org.bible.reading.dto.Bible
+import org.crosswire.jsword.book.BookCategory
+import org.crosswire.jsword.book.BookMetaData
+import org.crosswire.jsword.book.basic.AbstractPassageBook
+import org.crosswire.jsword.book.basic.DefaultBookMetaData
+import org.crosswire.jsword.book.filter.SourceFilter
+import org.crosswire.jsword.book.sword.SwordBookDriver
+import org.crosswire.jsword.book.sword.processing.RawTextToXmlProcessor
+import org.crosswire.jsword.passage.Key
+import org.crosswire.jsword.passage.PassageKeyFactory
+import org.crosswire.jsword.versification.BibleBook
+import org.crosswire.jsword.versification.system.Versifications
+import org.jdom2.Content
 import java.io.File
 import java.nio.file.Files
 import java.time.DayOfWeek
@@ -14,6 +26,28 @@ class PlanStateJSwordIntegrationTest {
 
     private fun tempPlanDir(): File = Files.createTempDirectory("plan_state_jsword_test").toFile().apply {
         deleteOnExit()
+    }
+
+    private fun createPartialPassageBook(initials: String, passageSpec: String): AbstractPassageBook {
+        val bmd = DefaultBookMetaData(SwordBookDriver.instance(), initials, BookCategory.BIBLE).apply {
+            setInitials(initials)
+            putProperty(BookMetaData.KEY_VERSIFICATION, "KJV")
+        }
+        val v11n = Versifications.instance().getVersification("KJV")
+        val populated = if (passageSpec.isBlank()) {
+            PassageKeyFactory.instance().createEmptyKeyList(v11n)
+        } else {
+            PassageKeyFactory.instance().getKey(v11n, passageSpec)
+        }
+        return object : AbstractPassageBook(bmd, null) {
+            override fun getGlobalKeyList(): Key = populated
+            override fun contains(key: Key): Boolean = populated.contains(key)
+            override fun getRawText(key: Key): String = ""
+            override fun getFilter(): SourceFilter? = null
+            override fun getOsis(key: Key, processor: RawTextToXmlProcessor): MutableList<Content> = mutableListOf()
+            override fun setRawText(key: Key, rawData: String) {}
+            override fun setAliasKey(alias: Key, source: Key) {}
+        }
     }
 
     @Test
@@ -76,5 +110,30 @@ class PlanStateJSwordIntegrationTest {
         assertEquals(reading.book, passage.bookName)
         assertEquals(reading.chapterNumber, passage.chapterNumber)
         assertTrue(passage.verses.isNotEmpty() || passage.fullText.isNotEmpty())
+    }
+
+    @Test
+    fun testGetModuleBooksExcludesEmptyBooksAndTracksPopulatedChapters() {
+        val state = PlanState(planStorageDir = tempPlanDir())
+
+        // NT-only module should omit all Old Testament books
+        val ntOnlyBook = createPartialPassageBook("TestNT", "Matt-Rev")
+        val ntToc = state.swordManager.getModuleBooks(ntOnlyBook)
+        assertEquals(27, ntToc.size)
+        assertEquals(BibleBook.MATT, ntToc.first().bibleBook)
+        assertEquals(BibleBook.REV, ntToc.last().bibleBook)
+        assertFalse(ntToc.any { it.bibleBook == BibleBook.GEN })
+
+        // Sparse partial module should only list populated books and chapters
+        val sparseBook = createPartialPassageBook("TestSparse", "Gen 1:1; John 3:16; John 5:1; Jude 1:1")
+        val sparseToc = state.swordManager.getModuleBooks(sparseBook)
+        assertEquals(listOf(BibleBook.GEN, BibleBook.JOHN, BibleBook.JUDE), sparseToc.map { it.bibleBook })
+        assertEquals(listOf(1), sparseToc[0].chapters)
+        assertEquals(listOf(3, 5), sparseToc[1].chapters)
+        assertEquals(listOf(1), sparseToc[2].chapters)
+
+        // Empty module should return an empty TOC
+        val emptyBook = createPartialPassageBook("TestEmpty", "")
+        assertTrue(state.swordManager.getModuleBooks(emptyBook).isEmpty())
     }
 }

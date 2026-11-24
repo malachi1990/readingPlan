@@ -29,8 +29,9 @@ import org.bible.reading.ui.FurtherStudyView
 import org.bible.reading.audio.ui.AudioPlayerBar
 import org.bible.reading.audio.ui.AudioSettingsDialog
 import org.bible.reading.tts.ui.TtsSettingsDialog
-import org.bible.reading.ui.ImportBookDialog
-import org.bible.reading.ui.openBookFileChooser
+import org.bible.reading.importer.service.ImportItemStatus
+import org.bible.reading.ui.ImportQueueDialog
+import org.bible.reading.ui.openBooksFileChooser
 import java.io.File
 import org.bible.reading.ui.MainAppTab
 import org.bible.reading.ui.PlanState
@@ -42,10 +43,8 @@ import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
 import java.util.Locale
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun App(state: PlanState = remember { PlanState() }) {
-    var appImportingFile by remember { mutableStateOf<File?>(null) }
     MaterialTheme {
         Surface(
             modifier = Modifier.fillMaxSize(),
@@ -126,10 +125,64 @@ fun App(state: PlanState = remember { PlanState() }) {
 
                             OutlinedButton(
                                 onClick = {
-                                    openBookFileChooser { appImportingFile = it }
+                                    openBooksFileChooser { files ->
+                                        state.swordManager.enqueueBookImports(files)
+                                        state.swordManager.importService.isQueueDialogOpen = true
+                                    }
                                 }
                             ) {
                                 Text("📥 Import Book", fontWeight = FontWeight.SemiBold)
+                            }
+
+                            val importService = state.swordManager.importService
+                            val importQueueItems = importService.queueItems
+                            if (importQueueItems.isNotEmpty()) {
+                                val isImporting = importService.isProcessing
+                                val successCount = importQueueItems.count { it.status is ImportItemStatus.Success }
+                                val failedCount = importQueueItems.count { it.status is ImportItemStatus.Failed }
+                                val doneCount = successCount + failedCount
+                                val chipContainerColor = when {
+                                    isImporting -> MaterialTheme.colorScheme.tertiaryContainer
+                                    failedCount > 0 -> MaterialTheme.colorScheme.errorContainer
+                                    else -> MaterialTheme.colorScheme.primaryContainer
+                                }
+                                val chipContentColor = when {
+                                    isImporting -> MaterialTheme.colorScheme.onTertiaryContainer
+                                    failedCount > 0 -> MaterialTheme.colorScheme.onErrorContainer
+                                    else -> MaterialTheme.colorScheme.onPrimaryContainer
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = chipContainerColor,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .clickable { importService.isQueueDialogOpen = true }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        if (isImporting) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(12.dp),
+                                                strokeWidth = 2.dp,
+                                                color = chipContentColor
+                                            )
+                                        }
+                                        val label = when {
+                                            isImporting -> "Importing ${doneCount + 1}/${importQueueItems.size}"
+                                            failedCount > 0 -> "⚠️ $successCount/${importQueueItems.size} imported"
+                                            else -> "✅ $successCount imported"
+                                        }
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = chipContentColor
+                                        )
+                                    }
+                                }
                             }
 
                             OutlinedButton(
@@ -193,12 +246,12 @@ fun App(state: PlanState = remember { PlanState() }) {
                 )
             }
 
-            if (appImportingFile != null) {
-                ImportBookDialog(
-                    selectedFile = appImportingFile!!,
+            if (state.swordManager.importService.isQueueDialogOpen) {
+                ImportQueueDialog(
                     manager = state.swordManager,
-                    onDismiss = { appImportingFile = null },
-                    onImportSuccess = {
+                    onDismiss = { state.swordManager.importService.isQueueDialogOpen = false },
+                    onImportSuccess = { book ->
+                        state.swordManager.pendingStudyModule = book
                         state.currentTab = MainAppTab.FURTHER_STUDY
                     }
                 )
