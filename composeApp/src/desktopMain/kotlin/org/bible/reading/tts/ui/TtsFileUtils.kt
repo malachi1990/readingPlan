@@ -10,26 +10,38 @@ import java.io.File
 object TtsFileUtils {
 
     /**
-     * Opens a native SAVE file dialog to save synthesized audio as a WAV file.
+     * Normalizes a suggested or user-entered filename so exported TTS audio defaults to `.mp3`.
+     */
+    fun normalizeSaveAudioFilename(filename: String): String {
+        val trimmed = filename.trim().ifBlank { "tts_audio" }
+        return if (trimmed.endsWith(".mp3", ignoreCase = true)) {
+            trimmed
+        } else {
+            val withoutWav = if (trimmed.endsWith(".wav", ignoreCase = true)) {
+                trimmed.dropLast(4)
+            } else {
+                trimmed
+            }
+            "$withoutWav.mp3"
+        }
+    }
+
+    /**
+     * Opens a native SAVE file dialog to save synthesized audio as a 128kbps MP3 file.
      */
     fun openSaveAudioFileDialog(
         defaultFilename: String,
         onFileSelected: (File) -> Unit
     ) {
         try {
-            val dialog = FileDialog(null as Frame?, "Save Audio As", FileDialog.SAVE)
-            val cleanName = if (defaultFilename.endsWith(".wav", ignoreCase = true)) {
-                defaultFilename
-            } else {
-                "$defaultFilename.wav"
-            }
-            dialog.file = cleanName
+            val dialog = FileDialog(null as Frame?, "Save Audio As (MP3)", FileDialog.SAVE)
+            dialog.file = normalizeSaveAudioFilename(defaultFilename)
             dialog.isVisible = true
 
             val file = dialog.file
             val dir = dialog.directory
             if (file != null && dir != null) {
-                val finalName = if (file.endsWith(".wav", ignoreCase = true)) file else "$file.wav"
+                val finalName = normalizeSaveAudioFilename(file)
                 onFileSelected(File(dir, finalName))
             }
         } catch (e: Exception) {

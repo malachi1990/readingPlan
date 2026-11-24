@@ -13,6 +13,7 @@ commons-codec = "1.16.1"
 commons-compress = "1.26.1"
 slf4j = "2.0.13"
 jlayer = "1.0.1"
+jump3r = "1.0.5"
 pdfbox = "3.0.4"
 
 [libraries]
@@ -30,6 +31,7 @@ commons-codec = { module = "commons-codec:commons-codec", version.ref = "commons
 commons-compress = { module = "org.apache.commons:commons-compress", version.ref = "commons-compress" }
 slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
 jlayer = { module = "javazoom:jlayer", version.ref = "jlayer" }
+jump3r = { module = "de.sciss:jump3r", version.ref = "jump3r" }
 pdfbox = { module = "org.apache.pdfbox:pdfbox", version.ref = "pdfbox" }
 
 [plugins]

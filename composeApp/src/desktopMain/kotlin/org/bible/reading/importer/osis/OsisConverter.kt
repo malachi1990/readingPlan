@@ -9,15 +9,22 @@ import org.bible.reading.importer.model.ImportedChapter
  *
  * Ensures faithful preservation of text formatting and whitespace:
  * - Tabs (`\t`), newlines (`\n`), and carriage returns (`\r` encoded as `&#13;` to survive XML normalization)
- * - Line breaks (`<br>`, `<hr>`) converted to `<lb/>\n`
- * - Paragraph separation (`<p>`, `<div>`)
+ * - Line breaks (`<br>`, `<hr>`) converted to `<lb/>`
+ * - Paragraph separation (`<p>`, `<div>`) with a single `\n` between block elements in OSIS XML
  * - Preformatted blocks (`<pre>`) with internal whitespace and indentation
- * - Section headings (`<h1>`..`<h6>`) with `canonical="true"` and paragraph spacing
+ * - Section headings (`<h1>`..`<h6>`) with `canonical="true"`
  * - Blockquotes (`<blockquote>`) and lists (`<ul>`, `<ol>`, `<li>`)
  * - Tables (`<table>`, `<tr>`, `<td>`, `<th>`)
  * - Whitespace entities (`&nbsp;`, `&ensp;`, `&emsp;`, `&thinsp;`, `&tab;`, `&NewLine;`)
  */
 object OsisConverter {
+
+    private const val PRE_PLACEHOLDER_PREFIX = "\u0000PRE_BLOCK_"
+    private const val PRE_PLACEHOLDER_SUFFIX = "\u0000"
+
+    private val allowedTags = setOf(
+        "p", "title", "hi", "q", "list", "item", "note", "reference", "lb", "div", "table", "row", "cell"
+    )
 
     /**
      * Converts a single chapter's HTML/XHTML content into an OSIS XML fragment
@@ -33,9 +40,9 @@ object OsisConverter {
             append("<div type=\"section\" osisID=\"").append(safeId).append("\">\n")
             // Include title if not already present in the converted body
             if (!convertedBody.contains("<title", ignoreCase = true)) {
-                append("  <title canonical=\"true\" level=\"1\">").append(safeTitle).append("</title>\n\n")
+                append("<title canonical=\"true\" level=\"1\">").append(safeTitle).append("</title>\n")
             }
-            append("  ").append(convertedBody).append("\n")
+            append(convertedBody).append("\n")
             append("</div>")
         }
     }
@@ -80,10 +87,10 @@ object OsisConverter {
 
     /**
      * Converts raw XHTML/HTML text into valid OSIS elements while preserving whitespace and formatting:
-     * - Preformatted text <pre> -> preserves tabs, carriage returns, and newlines with <lb/>\n
+     * - Preformatted text <pre> -> preserves tabs, carriage returns, and newlines with <lb/>
      * - Headings <h1>..<h6> -> <title canonical="true" level="...">
-     * - Line breaks <br>, <hr> -> <lb/>\n
-     * - Paragraphs <p> -> <p> with block separation
+     * - Line breaks <br>, <hr> -> <lb/>
+     * - Paragraphs <p> -> <p> with a single newline between block tags
      * - <em>, <i> -> <hi type="italic">
      * - <strong>, <b> -> <hi type="bold">
      * - <u> -> <hi type="underline">
@@ -91,8 +98,8 @@ object OsisConverter {
      * - <ul>, <ol>, <li> -> <list>, <item>
      * - <table>, <tr>, <td>, <th> -> <table>, <row>, <cell>
      * - <aside>, class="footnote" -> <note type="explanation">
-     * - Literal whitespace such as tabs (\t), new lines (\n), and carriage returns (\r)
-     * - Strips scripts, styles, iframes, invalid tags.
+     * - Literal whitespace such as tabs (\t), new lines (\n), and carriage returns (\r) inside paragraphs
+     * - Strips scripts, styles, iframes, invalid tags, and empty spacer paragraphs.
      */
     fun convertHtmlToOsisFragment(rawHtml: String): String {
         var text = rawHtml
@@ -114,22 +121,34 @@ object OsisConverter {
         // 4. Decode / normalize common HTML whitespace and typography entities
         text = normalizeHtmlEntities(text)
 
-        // 5. Preformatted blocks: preserve whitespace (tabs, carriage returns, new lines) inside <pre>
+        // 5. Preformatted blocks: preserve internal whitespace (tabs, carriage returns, newlines) inside <pre>.
+        //    Protect with placeholders so inter-block whitespace normalization leaves <pre> untouched.
+        val preBlocks = mutableListOf<String>()
         text = text.replace(Regex("""<pre\b[^>]*>(.*?)</pre>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))) { m ->
-            val preContent = m.groupValues[1]
-            val withLb = preContent
-                .replace("\r\n", "&#13;\n<lb/>")
-                .replace("\r", "&#13;<lb/>\n")
-                .replace("\n", "\n<lb/>\n")
-            "\n\n<p>$withLb</p>\n\n"
+            var preContent = m.groupValues[1]
+            if (preContent.startsWith("\r\n")) {
+                preContent = preContent.substring(2)
+            } else if (preContent.startsWith("\n") || preContent.startsWith("\r")) {
+                preContent = preContent.substring(1)
+            }
+            preContent = stripDisallowedTags(preContent)
+            val withLb = preContent.replace(Regex("""\r\n|\r|\n""")) { nl ->
+                when (nl.value) {
+                    "\r\n", "\r" -> "&#13;<lb/>"
+                    else -> "<lb/>"
+                }
+            }
+            val index = preBlocks.size
+            preBlocks.add("<p>$withLb</p>")
+            "\n$PRE_PLACEHOLDER_PREFIX$index$PRE_PLACEHOLDER_SUFFIX\n"
         }
 
         // 6. Preserve raw carriage returns in XML character data (so XML parsers don't normalize \r to \n)
         text = preserveCarriageReturns(text)
 
-        // 7. Line break / horizontal rule (match any attributes, e.g. <br class="calibre"/>)
-        text = text.replace(Regex("""<br\b[^>]*\/?>""", RegexOption.IGNORE_CASE), "<lb/>\n")
-        text = text.replace(Regex("""<hr\b[^>]*\/?>""", RegexOption.IGNORE_CASE), "<lb/>\n")
+        // 7. Line break / horizontal rule: emit <lb/> and consume following HTML source indentation newline if any
+        text = text.replace(Regex("""<br\b[^>]*\/?>(?:[ \t]*(?:&#13;)?\n[ \t]*)?""", RegexOption.IGNORE_CASE), "<lb/>")
+        text = text.replace(Regex("""<hr\b[^>]*\/?>(?:[ \t]*(?:&#13;)?\n[ \t]*)?""", RegexOption.IGNORE_CASE), "<lb/>")
 
         // 8. Footnotes / Notes: <aside...> -> <note type="explanation">
         text = text.replace(Regex("""<aside\b[^>]*>""", RegexOption.IGNORE_CASE), "<note type=\"explanation\">")
@@ -139,13 +158,13 @@ object OsisConverter {
         // 9. Headings <h1>..<h6> -> <title canonical="true" level="1..6">
         for (i in 1..6) {
             text = text.replace(Regex("""<h$i\b[^>]*>(.*?)</h$i>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))) { m ->
-                "\n\n<title canonical=\"true\" level=\"$i\">${m.groupValues[1].trim()}</title>\n\n"
+                "\n<title canonical=\"true\" level=\"$i\">${m.groupValues[1].trim()}</title>\n"
             }
         }
 
         // 10. Blockquotes -> <q type="block">
-        text = text.replace(Regex("""<blockquote\b[^>]*>""", RegexOption.IGNORE_CASE), "\n\n<q type=\"block\">")
-        text = text.replace(Regex("""</blockquote>""", RegexOption.IGNORE_CASE), "\n</q>\n")
+        text = text.replace(Regex("""<blockquote\b[^>]*>""", RegexOption.IGNORE_CASE), "\n<q type=\"block\">")
+        text = text.replace(Regex("""</blockquote>""", RegexOption.IGNORE_CASE), "</q>\n")
 
         // 11. Lists -> <list> and <item>
         text = text.replace(Regex("""<ul\b[^>]*>""", RegexOption.IGNORE_CASE), "\n<list>\n")
@@ -194,29 +213,70 @@ object OsisConverter {
         }
 
         // 17. Strip all remaining disallowed tags while keeping their text contents
-        // Allow valid OSIS fragment tags
-        val allowedTags = setOf("p", "title", "hi", "q", "list", "item", "note", "reference", "lb", "div", "table", "row", "cell")
+        text = stripDisallowedTags(text)
 
-        text = text.replace(Regex("""</?([a-zA-Z0-9]+)(\s+[^>]*)?/?>""")) { m ->
-            val tagName = m.groupValues[1].lowercase()
-            if (allowedTags.contains(tagName)) {
-                val rawTag = m.value
-                sanitizeTagAttributes(tagName, rawTag)
-            } else {
-                ""
-            }
+        // 18. Unwrap empty or whitespace-only <hi> tags (e.g. <strong class="calibre6"> </strong>)
+        text = text.replace(Regex("""<hi\b[^>]*>([\s\u00A0]*(?:(?:&#160;|&#13;)[\s\u00A0]*)*)</hi>""", RegexOption.IGNORE_CASE)) { m ->
+            m.groupValues[1]
         }
 
-        // Normalize excessive newlines (keep up to 2 for paragraph breaks)
-        text = text.replace(Regex("""\n{3,}"""), "\n")
+        // 19. Remove empty / spacer-only block elements (e.g. <p></p>, <p>&nbsp;</p>, <p><br/></p>, <h2>&nbsp;</h2>)
+        val emptyContentPattern = """(?:[\s\u00A0]|&#160;|&#13;|<lb\s*/?>)*"""
+        text = text.replace(Regex("""<p>$emptyContentPattern</p>""", RegexOption.IGNORE_CASE), "\n")
+        text = text.replace(Regex("""<title\b[^>]*>$emptyContentPattern</title>""", RegexOption.IGNORE_CASE), "\n")
+        text = text.replace(Regex("""<item>$emptyContentPattern</item>""", RegexOption.IGNORE_CASE), "\n")
+        text = text.replace(Regex("""<q\b[^>]*>$emptyContentPattern</q>""", RegexOption.IGNORE_CASE), "\n")
+        text = text.replace(Regex("""<list>$emptyContentPattern</list>""", RegexOption.IGNORE_CASE), "\n")
 
-        // 18. Ensure text is enclosed in at least <p> tags if no paragraphs or titles exist
-        val trimmed = text.trim()
-        if (trimmed.isNotBlank() && !trimmed.startsWith("<p") && !trimmed.startsWith("<title") && !trimmed.startsWith("<div")) {
+        // 20. Trim leading/trailing HTML formatting whitespace inside <p>, <title>, and <item>
+        //     (preserve intentional leading tabs or 2+ space indentation on <p> when not preceded by an HTML newline)
+        text = text.replace(Regex("""<p>(?:(?:[ \t\u00A0]|&#13;)*\n[ \t\u00A0]*|(?:\u00A0|&#13;)+| (?![ \u00A0]))+"""), "<p>")
+        text = text.replace(Regex("""(?:[\s\u00A0]|&#13;)+</p>"""), "</p>")
+        text = text.replace(Regex("""(<title\b[^>]*>)(?:[\s\u00A0]|&#13;)+""")) { m -> m.groupValues[1] }
+        text = text.replace(Regex("""(?:[\s\u00A0]|&#13;)+</title>"""), "</title>")
+        text = text.replace(Regex("""<item>(?:[\s\u00A0]|&#13;)+"""), "<item>")
+        text = text.replace(Regex("""(?:[\s\u00A0]|&#13;)+</item>"""), "</item>")
+
+        // 21. Normalize all whitespace/indentation/CRLF between block tags to a single newline
+        val blockBoundary = """(?:</?(?:p|title|q|list|item|table|row)\b[^>]*>|${Regex.escape(PRE_PLACEHOLDER_PREFIX)}\d+${Regex.escape(PRE_PLACEHOLDER_SUFFIX)})"""
+        val wsAndCr = """(?:[\s\u00A0]|&#13;)+"""
+        text = text.replace(Regex("""($blockBoundary)$wsAndCr(?=$blockBoundary)""")) { m ->
+            "${m.groupValues[1]}\n"
+        }
+
+        // Collapse any remaining runs of 2+ newlines outside <pre> to a single newline
+        text = text.replace(Regex("""(?:(?:&#13;)?\n[ \t]*){2,}"""), "\n")
+
+        // 22. Restore <pre> blocks
+        for ((index, preOsis) in preBlocks.withIndex()) {
+            text = text.replace("$PRE_PLACEHOLDER_PREFIX$index$PRE_PLACEHOLDER_SUFFIX", preOsis)
+        }
+
+        // 23. Ensure text is enclosed in at least <p> tags if no block tags exist
+        val trimmed = text.replace(Regex("""^(?:[\s\u00A0]|&#13;)+|(?:[\s\u00A0]|&#13;)+$"""), "")
+        if (trimmed.isNotBlank() &&
+            !trimmed.startsWith("<p") &&
+            !trimmed.startsWith("<title") &&
+            !trimmed.startsWith("<div") &&
+            !trimmed.startsWith("<q") &&
+            !trimmed.startsWith("<list") &&
+            !trimmed.startsWith("<table")
+        ) {
             return "<p>$trimmed</p>"
         }
 
         return if (trimmed.isBlank()) "<p></p>" else trimmed
+    }
+
+    private fun stripDisallowedTags(input: String): String {
+        return input.replace(Regex("""</?([a-zA-Z0-9]+)(\s+[^>]*)?/?>""")) { m ->
+            val tagName = m.groupValues[1].lowercase()
+            if (allowedTags.contains(tagName)) {
+                sanitizeTagAttributes(tagName, m.value)
+            } else {
+                ""
+            }
+        }
     }
 
     private fun sanitizeTagAttributes(tagName: String, fullTag: String): String {
@@ -236,7 +296,7 @@ object OsisConverter {
             }
             "q" -> "<q type=\"block\">"
             "note" -> "<note type=\"explanation\">"
-            "lb" -> "<lb/>\n"
+            "lb" -> "<lb/>"
             "list" -> "<list>"
             "item" -> "<item>"
             "p" -> "<p>"

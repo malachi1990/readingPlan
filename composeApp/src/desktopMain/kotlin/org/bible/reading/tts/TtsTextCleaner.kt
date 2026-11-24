@@ -9,9 +9,22 @@ object TtsTextCleaner {
     private val xmlTagRegex = Regex("<[^>]*>")
     private val strongsRegex = Regex("\\b[GH]\\d{1,5}\\b")
     private val morphologyRegex = Regex("\\b(robinson|strong|morph):[A-Za-z0-9/-]+\\b", RegexOption.IGNORE_CASE)
-    private val footnoteMarkerRegex = Regex("\\[[0-9a-zA-Z*†‡§ ]+\\]|\\([0-9a-zA-Z*†‡§ ]+\\)")
-    private val bracketArtifactsRegex = Regex("[\\{\\}\\[\\]<>#*_~|]")
+    private val footnoteMarkerRegex = Regex("\\[[0-9a-zA-Z*†‡§ ]+]|\\([0-9a-zA-Z*†‡§ ]+\\)")
+    private val bracketArtifactsRegex = Regex("[{}\\[\\]<>#*_~|]")
     private val multipleWhitespaceRegex = Regex("\\s+")
+    private val paragraphSeparatorRegex = Regex("""\r?\n(?:[ \t]*\r?\n)+""")
+
+    /**
+     * Splits formatted section or passage text into individual non-blank paragraphs.
+     * Preserves single internal line breaks and horizontal indentation within each paragraph.
+     */
+    fun splitIntoParagraphs(content: String): List<String> {
+        if (content.isBlank()) return emptyList()
+        return content
+            .split(paragraphSeparatorRegex)
+            .map { it.trim('\r', '\n') }
+            .filter { it.isNotBlank() }
+    }
 
     /**
      * Cleans raw Sword or book module text into clean, pronounceable sentences.
@@ -84,5 +97,12 @@ object TtsTextCleaner {
             "$title."
         }
         return "$intro $cleanBody"
+    }
+
+    /**
+     * Formats an individual paragraph from a non-Bible book for natural speech synthesis.
+     */
+    fun formatParagraphForSpeech(paragraphText: String): String {
+        return cleanForSpeech(paragraphText)
     }
 }

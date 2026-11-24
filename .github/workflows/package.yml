@@ -1,0 +1,137 @@
+name: Package Desktop Distributions
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package-windows-exe:
+    name: Windows (.exe)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Package Windows EXE
+        run: ./gradlew :composeApp:packageExe --no-daemon
+
+      - name: Upload Windows EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe-x64
+          path: composeApp/build/compose/binaries/main/exe/*.exe
+          if-no-files-found: error
+
+  package-macos-arm64-dmg:
+    name: macOS arm64 (.dmg)
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify Apple Silicon (arm64) runner
+        run: |
+          ARCH="$(uname -m)"
+          echo "Runner architecture: $ARCH"
+          if [ "$ARCH" != "arm64" ]; then
+            echo "Expected arm64 runner, got $ARCH"
+            exit 1
+          fi
+
+      - name: Set up JDK 21 (arm64)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          architecture: aarch64
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Package macOS DMG (arm64)
+        run: ./gradlew :composeApp:packageDmg --no-daemon
+
+      - name: Upload macOS arm64 DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg-arm64
+          path: composeApp/build/compose/binaries/main/dmg/*.dmg
+          if-no-files-found: error
+
+  package-linux-flatpak:
+    name: Linux (.flatpak)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install Flatpak & Freedesktop Runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+
+      - name: Package Linux Flatpak Bundle
+        run: ./gradlew :composeApp:packageFlatpak --no-daemon
+
+      - name: Upload Linux Flatpak artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-flatpak-x86_64
+          path: composeApp/build/compose/binaries/main/flatpak/*.flatpak
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - package-windows-exe
+      - package-macos-arm64-dmg
+      - package-linux-flatpak
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-artifacts/*.exe
+            release-artifacts/*.dmg
+            release-artifacts/*.flatpak
+          generate_release_notes: true

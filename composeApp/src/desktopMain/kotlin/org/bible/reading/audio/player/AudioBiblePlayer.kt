@@ -11,14 +11,16 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.bible.reading.audio.model.AudioTrack
+import kotlin.math.roundToInt
 
 /**
  * High-level observable audio player managing playlist playback, playback states,
- * and time-tracking for Compose desktop UI.
+ * playback speed (0.25x to 2.00x in 0.05x steps), and time-tracking for Compose desktop UI.
  */
 class AudioBiblePlayer(
     initialVolume: Float = 0.85f,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default)
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default),
+    initialPlaybackSpeed: Float = 1.0f
 ) {
     var currentTrack by mutableStateOf<AudioTrack?>(null)
         private set
@@ -43,10 +45,16 @@ class AudioBiblePlayer(
     var volume by mutableStateOf(initialVolume)
         private set
 
+    private var playbackSpeedState by mutableStateOf(normalizePlaybackSpeed(initialPlaybackSpeed))
+    val playbackSpeed: Float
+        get() = playbackSpeedState
+
     var errorMessage by mutableStateOf<String?>(null)
         private set
 
     var autoPlayNext by mutableStateOf(true)
+
+    var onPlaybackSpeedChanged: ((Float) -> Unit)? = null
 
     private var activeSession: AudioStreamSession? = null
     private var progressJob: Job? = null
@@ -141,6 +149,7 @@ class AudioBiblePlayer(
         try {
             val session = codec.createSession(track.file)
             session.setVolume(volume)
+            session.setPlaybackSpeed(playbackSpeed)
             session.setOnCompletionListener {
                 scope.launch {
                     handleTrackCompletion()
@@ -240,6 +249,44 @@ class AudioBiblePlayer(
     fun setVolumeLevel(newVolume: Float) {
         volume = newVolume.coerceIn(0f, 1f)
         activeSession?.setVolume(volume)
+    }
+
+    /**
+     * Sets playback speed within [0.25x, 2.00x], snapped to exact 0.05x (5%) increments.
+     */
+    fun setPlaybackSpeed(newSpeed: Float) {
+        val normalized = normalizePlaybackSpeed(newSpeed)
+        val changed = normalized != playbackSpeedState
+        playbackSpeedState = normalized
+        activeSession?.setPlaybackSpeed(normalized)
+        if (changed) {
+            onPlaybackSpeedChanged?.invoke(normalized)
+        }
+    }
+
+    /**
+     * Increases playback speed by 5% (0.05x), up to 2.00x.
+     */
+    fun increasePlaybackSpeed() {
+        val currentStep = (playbackSpeed / PLAYBACK_SPEED_STEP).roundToInt().coerceIn(5, 40)
+        val nextStep = (currentStep + 1).coerceAtMost(40)
+        setPlaybackSpeed((nextStep * 5) / 100f)
+    }
+
+    /**
+     * Decreases playback speed by 5% (0.05x), down to 0.25x.
+     */
+    fun decreasePlaybackSpeed() {
+        val currentStep = (playbackSpeed / PLAYBACK_SPEED_STEP).roundToInt().coerceIn(5, 40)
+        val prevStep = (currentStep - 1).coerceAtLeast(5)
+        setPlaybackSpeed((prevStep * 5) / 100f)
+    }
+
+    /**
+     * Resets playback speed to 1.00x.
+     */
+    fun resetPlaybackSpeed() {
+        setPlaybackSpeed(1.0f)
     }
 
     fun nextTrack() {

@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import javazoom.jl.decoder.Bitstream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -15,7 +16,11 @@ import org.bible.reading.audio.model.AudioTrack
 import org.bible.reading.audio.player.AudioBiblePlayer
 import org.bible.reading.jsword.ChapterPassage
 import org.crosswire.jsword.book.Book
+import java.io.BufferedInputStream
 import java.io.File
+import java.io.FileInputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import javax.sound.sampled.AudioSystem
 
@@ -163,7 +168,7 @@ class TtsService(
     }
 
     /**
-     * Core synthesis logic with disk-based audio caching.
+     * Core synthesis logic with disk-based 128kbps MP3 audio caching.
      */
     suspend fun synthesizeAudio(
         textToSpeak: String,
@@ -173,58 +178,83 @@ class TtsService(
         val speed = preferences.speechRate
         val silence = preferences.sentenceSilence
 
-        // Calculate cache key incorporating engine, speed, silence, and kokoro options
+        // Calculate cache key incorporating output format (mp3_128), engine, speed, silence, and kokoro options
         val cacheKey = hashText(
-            "${preferences.selectedEngine.id}:${voice.id}:$speed:$silence:" +
+            "mp3_${TtsMp3Encoder.DEFAULT_BITRATE_KBPS}:${preferences.selectedEngine.id}:${voice.id}:$speed:$silence:" +
             "${preferences.kokoroUseCuda}:${preferences.kokoroBinaryPath}:$textToSpeak"
         )
-        val cachedFile = File(cacheDir, "$cacheKey.wav")
+        val cachedFile = File(cacheDir, "$cacheKey.mp3")
 
-        if (cachedFile.exists() && cachedFile.length() > 1024) {
+        if (cachedFile.exists() && cachedFile.length() > 256) {
             return@withContext Result.success(cachedFile)
         }
 
-        val tempFile = File(cacheDir, "$cacheKey.tmp.wav")
+        val tempWavFile = File(cacheDir, "$cacheKey.tmp.wav")
+        val tempMp3File = File(cacheDir, "$cacheKey.tmp.mp3")
 
-        val result = when (voice.engineType) {
-            TtsEngineType.PIPER -> {
-                if (!piperManager.isBinaryInstalled()) {
-                    val dlBin = piperManager.downloadBinary()
-                    if (dlBin.isFailure) {
-                        return@withContext Result.failure(dlBin.exceptionOrNull() ?: Exception("Piper binary not ready"))
+        try {
+            val result = when (voice.engineType) {
+                TtsEngineType.PIPER -> {
+                    if (!piperManager.isBinaryInstalled()) {
+                        val dlBin = piperManager.downloadBinary()
+                        if (dlBin.isFailure) {
+                            return@withContext Result.failure(dlBin.exceptionOrNull() ?: Exception("Piper binary not ready"))
+                        }
                     }
-                }
-                if (!piperManager.isVoiceDownloaded(voice)) {
-                    val dlVoice = piperManager.downloadVoice(voice)
-                    if (dlVoice.isFailure) {
-                        return@withContext Result.failure(dlVoice.exceptionOrNull() ?: Exception("Voice model not downloaded"))
+                    if (!piperManager.isVoiceDownloaded(voice)) {
+                        val dlVoice = piperManager.downloadVoice(voice)
+                        if (dlVoice.isFailure) {
+                            return@withContext Result.failure(dlVoice.exceptionOrNull() ?: Exception("Voice model not downloaded"))
+                        }
                     }
+                    piperManager.synthesize(textToSpeak, tempWavFile, voice, speed, silence)
                 }
-                piperManager.synthesize(textToSpeak, tempFile, voice, speed, silence)
+                TtsEngineType.KOKORO -> {
+                    kokoroManager.synthesize(
+                        text = textToSpeak,
+                        outputWav = tempWavFile,
+                        voice = voice,
+                        speechRate = speed,
+                        configuredPython = preferences.kokoroPythonPath,
+                        configuredModel = preferences.kokoroBinaryPath,
+                        configuredVoices = preferences.kokoroVoicesPath,
+                        useCuda = preferences.kokoroUseCuda
+                    )
+                }
+                TtsEngineType.SYSTEM -> {
+                    systemTtsEngine.synthesize(textToSpeak, tempWavFile, speed)
+                }
             }
-            TtsEngineType.KOKORO -> {
-                kokoroManager.synthesize(
-                    text = textToSpeak,
-                    outputWav = tempFile,
-                    voice = voice,
-                    speechRate = speed,
-                    configuredPython = preferences.kokoroPythonPath,
-                    configuredModel = preferences.kokoroBinaryPath,
-                    configuredVoices = preferences.kokoroVoicesPath,
-                    useCuda = preferences.kokoroUseCuda
+
+            if (result.isSuccess && tempWavFile.exists()) {
+                val encodeResult = TtsMp3Encoder.encodeWavToMp3(
+                    sourceWav = tempWavFile,
+                    targetMp3 = tempMp3File,
+                    bitrateKbps = TtsMp3Encoder.DEFAULT_BITRATE_KBPS
                 )
+                if (encodeResult.isSuccess && tempMp3File.exists()) {
+                    try {
+                        Files.move(
+                            tempMp3File.toPath(),
+                            cachedFile.toPath(),
+                            StandardCopyOption.REPLACE_EXISTING
+                        )
+                    } catch (_: Exception) {
+                        tempMp3File.renameTo(cachedFile)
+                    }
+                    Result.success(cachedFile)
+                } else {
+                    tempMp3File.delete()
+                    Result.failure(encodeResult.exceptionOrNull() ?: RuntimeException("MP3 encoding failed"))
+                }
+            } else {
+                Result.failure(result.exceptionOrNull() ?: RuntimeException("Audio synthesis failed"))
             }
-            TtsEngineType.SYSTEM -> {
-                systemTtsEngine.synthesize(textToSpeak, tempFile, speed)
+        } finally {
+            tempWavFile.delete()
+            if (tempMp3File.exists()) {
+                tempMp3File.delete()
             }
-        }
-
-        if (result.isSuccess && tempFile.exists()) {
-            tempFile.renameTo(cachedFile)
-            Result.success(cachedFile)
-        } else {
-            tempFile.delete()
-            Result.failure(result.exceptionOrNull() ?: RuntimeException("Audio synthesis failed"))
         }
     }
 
@@ -252,22 +282,22 @@ class TtsService(
     }
 
     /**
-     * Synthesizes text directly to a user-specified destination file without playing.
+     * Synthesizes text directly to a user-specified destination 128kbps MP3 file without playing.
      */
     suspend fun synthesizeToFile(
         textToSpeak: String,
         trackTitle: String,
         destinationFile: File
     ): Result<File> = withContext(Dispatchers.IO) {
-        statusMessage = "Synthesizing audio for export..."
+        statusMessage = "Synthesizing 128kbps MP3 for export..."
         val synthRes = synthesizeAudio(textToSpeak, trackTitle)
         if (synthRes.isFailure) {
             val err = synthRes.exceptionOrNull()?.message ?: "Synthesis failed"
             statusMessage = "Export failed: $err"
             return@withContext synthRes
         }
-        val wavFile = synthRes.getOrThrow()
-        saveAudioToFile(wavFile, destinationFile)
+        val mp3File = synthRes.getOrThrow()
+        saveAudioToFile(mp3File, destinationFile)
     }
 
     /**
@@ -506,6 +536,101 @@ class TtsService(
     }
 
     /**
+     * Builds the unique, human-readable track title for an individual paragraph in a non-Bible book.
+     */
+    fun buildParagraphTrackTitle(
+        sectionTitle: String,
+        subtitle: String,
+        paragraphIndex: Int
+    ): String {
+        val base = sectionTitle.ifBlank { "Section" }
+        val paraLabel = "¶${paragraphIndex + 1}"
+        return if (subtitle.isNotBlank()) "$base • $paraLabel • $subtitle" else "$base • $paraLabel"
+    }
+
+    /**
+     * Reads an individual paragraph from a non-Bible book immediately,
+     * or toggles play/pause if that paragraph is already active.
+     */
+    fun readParagraph(
+        sectionTitle: String,
+        subtitle: String,
+        paragraphIndex: Int,
+        paragraphText: String,
+        player: AudioBiblePlayer
+    ) {
+        val trackTitle = buildParagraphTrackTitle(sectionTitle, subtitle, paragraphIndex)
+
+        if (player.isTrackActive(trackTitle)) {
+            player.togglePlayPause()
+            return
+        }
+
+        val speechText = TtsTextCleaner.formatParagraphForSpeech(paragraphText)
+        if (speechText.isBlank()) {
+            statusMessage = "No speakable text available in paragraph ${paragraphIndex + 1}."
+            return
+        }
+
+        startReadingTrack(trackTitle, subtitle, speechText, player)
+    }
+
+    /**
+     * Queues an individual paragraph from a non-Bible book for TTS playback.
+     * If playback is idle, starts playing immediately; otherwise enqueues to playlist.
+     */
+    fun queueParagraph(
+        sectionTitle: String,
+        subtitle: String,
+        paragraphIndex: Int,
+        paragraphText: String,
+        player: AudioBiblePlayer
+    ) {
+        val trackTitle = buildParagraphTrackTitle(sectionTitle, subtitle, paragraphIndex)
+
+        if (player.isTrackQueued(trackTitle)) {
+            statusMessage = "\"$trackTitle\" is already in the queue."
+            return
+        }
+
+        val speechText = TtsTextCleaner.formatParagraphForSpeech(paragraphText)
+        if (speechText.isBlank()) {
+            statusMessage = "No speakable text available in paragraph ${paragraphIndex + 1}."
+            return
+        }
+
+        if (!player.isPlaying && !player.isPaused && player.currentTrack == null) {
+            startReadingTrack(trackTitle, subtitle, speechText, player)
+            return
+        }
+
+        scope.launch {
+            statusMessage = "Queuing paragraph ${paragraphIndex + 1}..."
+            try {
+                val res = synthesizeAudio(speechText, trackTitle)
+                if (res.isSuccess) {
+                    val file = res.getOrThrow()
+                    val durationMs = computeDurationMs(file)
+                    val track = AudioTrack(
+                        file = file,
+                        title = trackTitle,
+                        subtitle = subtitle,
+                        durationMs = durationMs
+                    )
+                    queueMutex.withLock {
+                        player.enqueueTrack(track)
+                    }
+                    statusMessage = "Added paragraph ${paragraphIndex + 1} to queue (${player.playlist.size} total)"
+                } else {
+                    statusMessage = "Failed to queue paragraph ${paragraphIndex + 1}: ${res.exceptionOrNull()?.message}"
+                }
+            } catch (e: Exception) {
+                statusMessage = "Error queuing paragraph ${paragraphIndex + 1}: ${e.message}"
+            }
+        }
+    }
+
+    /**
      * Tests the currently selected or specified voice with a classic scripture sample.
      */
     fun testVoice(
@@ -569,6 +694,36 @@ class TtsService(
     }
 
     fun computeDurationMs(file: File): Long {
+        if (file.extension.equals("mp3", ignoreCase = true)) {
+            return try {
+                FileInputStream(file).use { fis ->
+                    BufferedInputStream(fis).use { bis ->
+                        val bitstream = Bitstream(bis)
+                        try {
+                            val header = bitstream.readFrame() ?: return -1L
+                            val maxMs = header.total_ms(file.length().coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+                            if (maxMs > 0) {
+                                maxMs.toLong()
+                            } else {
+                                val bitrate = header.bitrate()
+                                if (bitrate > 0) {
+                                    (file.length() * 8L * 1000L) / bitrate
+                                } else {
+                                    -1L
+                                }
+                            }
+                        } finally {
+                            try {
+                                bitstream.close()
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                -1L
+            }
+        }
+
         return try {
             AudioSystem.getAudioInputStream(file).use { ais ->
                 val format = ais.format

@@ -46,6 +46,10 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
     private val isStopped = AtomicBoolean(false)
 
     private var currentVolume: Float = 0.85f
+
+    @Volatile
+    private var currentPlaybackSpeed: Float = 1.0f
+
     private var playbackThread: Thread? = null
     private var line: SourceDataLine? = null
 
@@ -131,6 +135,10 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
         applyVolume(line, currentVolume)
     }
 
+    override fun setPlaybackSpeed(speed: Float) {
+        currentPlaybackSpeed = normalizePlaybackSpeed(speed)
+    }
+
     override fun release() {
         stop()
         try {
@@ -168,8 +176,9 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
 
             msPerFrame = initialHeader.ms_per_frame()
             val initialSampleBuffer = decoder.decodeFrame(initialHeader, initialBitstream) as SampleBuffer
-            val sampleRate = initialSampleBuffer.sampleFrequency
-            val channels = initialSampleBuffer.channelCount
+            val sampleRate = initialSampleBuffer.sampleFrequency.coerceAtLeast(8000)
+            val channels = initialSampleBuffer.channelCount.coerceAtLeast(1)
+            val frameBytes = channels * 2
 
             val format = AudioFormat(
                 sampleRate.toFloat(),
@@ -184,23 +193,37 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
                 throw LineUnavailableException("Audio format not supported by system mixer: $format")
             }
 
+            val rawBufferSize = ((sampleRate * frameBytes * 0.15).toInt() / frameBytes) * frameBytes
+            val lineBufferSize = rawBufferSize.coerceIn(8192, 32768).let { it - (it % frameBytes) }
+
             val dataLine = AudioSystem.getLine(info) as SourceDataLine
-            dataLine.open(format, 32768)
+            dataLine.open(format, lineBufferSize)
             applyVolume(dataLine, currentVolume)
             dataLine.start()
             this.line = dataLine
 
+            val stretcher = PcmTimeStretcher(sampleRate, channels)
+
+            fun emitStretched(pcmBytes: ByteArray) {
+                val stretched = stretcher.process(pcmBytes, pcmBytes.size, currentPlaybackSpeed)
+                if (stretched.isNotEmpty() && !isStopped.get()) {
+                    writeChunkedPcm(dataLine, stretched, lineBufferSize, frameBytes)
+                }
+            }
+
             // Write first frame
-            writeSampleBuffer(dataLine, initialSampleBuffer)
+            emitStretched(sampleBufferToPcmBytes(initialSampleBuffer))
             initialBitstream.closeFrame()
             currentFrame++
-            currentPositionAtomic.set((currentFrame * msPerFrame).toLong())
+            val initPendingMs = (stretcher.estimatedPendingInputFrames() * 1000L) / sampleRate
+            currentPositionAtomic.set(((currentFrame * msPerFrame).toLong() - initPendingMs).coerceAtLeast(0L))
 
             var activeBs = initialBitstream
 
             fun applySeek(seekTargetMs: Long) {
                 val targetFrame = (seekTargetMs / msPerFrame).toLong()
                 dataLine.flush()
+                stretcher.reset()
 
                 if (targetFrame < currentFrame) {
                     try {
@@ -251,15 +274,22 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
                 val header = activeBs.readFrame() ?: break // End of stream reached
                 msPerFrame = header.ms_per_frame()
                 val sampleBuffer = decoder.decodeFrame(header, activeBs) as SampleBuffer
-                writeSampleBuffer(dataLine, sampleBuffer)
+                emitStretched(sampleBufferToPcmBytes(sampleBuffer))
                 activeBs.closeFrame()
 
                 currentFrame++
-                currentPositionAtomic.set((currentFrame * msPerFrame).toLong())
+                val pendingMs = (stretcher.estimatedPendingInputFrames() * 1000L) / sampleRate
+                currentPositionAtomic.set(((currentFrame * msPerFrame).toLong() - pendingMs).coerceAtLeast(0L))
             }
 
             if (!isStopped.get()) {
-                dataLine.drain()
+                val tailPcm = stretcher.finish()
+                if (tailPcm.isNotEmpty() && !isStopped.get()) {
+                    writeChunkedPcm(dataLine, tailPcm, lineBufferSize, frameBytes)
+                }
+                if (!isStopped.get()) {
+                    dataLine.drain()
+                }
             }
 
         } catch (e: InterruptedException) {
@@ -290,7 +320,7 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
         }
     }
 
-    private fun writeSampleBuffer(dataLine: SourceDataLine, sampleBuffer: SampleBuffer) {
+    private fun sampleBufferToPcmBytes(sampleBuffer: SampleBuffer): ByteArray {
         val buffer = sampleBuffer.buffer
         val length = sampleBuffer.bufferLength
         val pcmBytes = ByteArray(length * 2)
@@ -300,8 +330,24 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
             pcmBytes[i * 2] = (sample and 0xFF).toByte()
             pcmBytes[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
         }
+        return pcmBytes
+    }
 
-        dataLine.write(pcmBytes, 0, pcmBytes.size)
+    private fun writeChunkedPcm(
+        dataLine: SourceDataLine,
+        pcmBytes: ByteArray,
+        maxChunkSize: Int,
+        frameBytes: Int
+    ) {
+        val step = (maxChunkSize - (maxChunkSize % frameBytes)).coerceAtLeast(frameBytes)
+        var offset = 0
+        while (offset < pcmBytes.size && !isStopped.get()) {
+            val len = minOf(step, pcmBytes.size - offset)
+            val alignedLen = len - (len % frameBytes)
+            if (alignedLen <= 0) break
+            dataLine.write(pcmBytes, offset, alignedLen)
+            offset += alignedLen
+        }
     }
 
     private fun applyVolume(dataLine: SourceDataLine?, volume: Float) {

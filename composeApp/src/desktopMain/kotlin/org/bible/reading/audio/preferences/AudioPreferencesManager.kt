@@ -1,5 +1,6 @@
 package org.bible.reading.audio.preferences
 
+import org.bible.reading.audio.player.normalizePlaybackSpeed
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -12,6 +13,7 @@ data class AudioPreferences(
     var customBookGroup: Int = 1,
     var customChapterGroup: Int = 2,
     var volume: Float = 0.85f,
+    var playbackSpeed: Float = 1.0f,
     var autoPlayNext: Boolean = true
 )
 
@@ -36,6 +38,9 @@ class AudioPreferencesManager(private val appDir: File) {
                 prefs.customBookGroup = props.getProperty("customBookGroup", "1").toIntOrNull() ?: 1
                 prefs.customChapterGroup = props.getProperty("customChapterGroup", "2").toIntOrNull() ?: 2
                 prefs.volume = props.getProperty("volume", "0.85").toFloatOrNull() ?: 0.85f
+                prefs.playbackSpeed = normalizePlaybackSpeed(
+                    props.getProperty("playbackSpeed", "1.0").toFloatOrNull() ?: 1.0f
+                )
                 prefs.autoPlayNext = props.getProperty("autoPlayNext", "true").toBooleanStrictOrNull() ?: true
             } catch (e: Exception) {
                 println("Failed to read audio_preferences.properties: ${e.message}")
@@ -48,6 +53,7 @@ class AudioPreferencesManager(private val appDir: File) {
     fun savePreferences(prefs: AudioPreferences) {
         try {
             if (!appDir.exists()) appDir.mkdirs()
+            val normalizedSpeed = normalizePlaybackSpeed(prefs.playbackSpeed)
             val props = Properties().apply {
                 setProperty("audioDirectory", prefs.audioDirectory)
                 setProperty("selectedStrategyId", prefs.selectedStrategyId)
@@ -55,6 +61,7 @@ class AudioPreferencesManager(private val appDir: File) {
                 setProperty("customBookGroup", prefs.customBookGroup.toString())
                 setProperty("customChapterGroup", prefs.customChapterGroup.toString())
                 setProperty("volume", prefs.volume.toString())
+                setProperty("playbackSpeed", normalizedSpeed.toString())
                 setProperty("autoPlayNext", prefs.autoPlayNext.toString())
             }
             FileOutputStream(prefFile).use { props.store(it, "Bible Reading Plan - Audio Preferences") }

@@ -34,7 +34,7 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
     override var durationMs: Long = -1L
         private set
 
-    override var currentPositionMs: Long = 0L
+    override val currentPositionMs: Long
         get() = currentPositionAtomic.get()
 
     private val currentPositionAtomic = AtomicLong(0L)
@@ -42,6 +42,10 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
     private val isStopped = AtomicBoolean(false)
 
     private var currentVolume: Float = 0.85f
+
+    @Volatile
+    private var currentPlaybackSpeed: Float = 1.0f
+
     private var playbackThread: Thread? = null
     private var line: SourceDataLine? = null
 
@@ -117,6 +121,10 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
         applyVolume(line, currentVolume)
     }
 
+    override fun setPlaybackSpeed(speed: Float) {
+        currentPlaybackSpeed = normalizePlaybackSpeed(speed)
+    }
+
     override fun release() {
         stop()
         try {
@@ -142,13 +150,15 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
             audioIn = initialAudioIn
             val baseFormat = initialAudioIn.format
 
+            val channels = baseFormat.channels.coerceAtLeast(1)
+            val sampleRate = baseFormat.sampleRate.takeIf { it > 0f } ?: 44100f
             val decodedFormat = AudioFormat(
                 AudioFormat.Encoding.PCM_SIGNED,
-                baseFormat.sampleRate,
+                sampleRate,
                 16,
-                baseFormat.channels,
-                baseFormat.channels * 2,
-                baseFormat.sampleRate,
+                channels,
+                channels * 2,
+                sampleRate,
                 false
             )
 
@@ -160,16 +170,22 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
                 throw LineUnavailableException("Format not supported: $decodedFormat")
             }
 
+            val frameBytes = decodedFormat.frameSize.coerceAtLeast(channels * 2)
+            val rawBufferSize = ((sampleRate * frameBytes * 0.15).toInt() / frameBytes) * frameBytes
+            val lineBufferSize = rawBufferSize.coerceIn(8192, 32768).let { it - (it % frameBytes) }
+
             val dataLine = AudioSystem.getLine(info) as SourceDataLine
-            dataLine.open(decodedFormat, 32768)
+            dataLine.open(decodedFormat, lineBufferSize)
             applyVolume(dataLine, currentVolume)
             dataLine.start()
             this.line = dataLine
 
-            val buffer = ByteArray(4096)
+            val readChunkSize = (4096 - (4096 % frameBytes)).coerceAtLeast(frameBytes)
+            val buffer = ByteArray(readChunkSize)
             val bytesPerMs = (decodedFormat.frameRate * decodedFormat.frameSize / 1000f).coerceAtLeast(1f)
             var totalBytesRead = 0L
             var activePcmIn = initialPcmIn
+            val stretcher = PcmTimeStretcher(sampleRate.toInt().coerceAtLeast(8000), channels)
 
             fun applySeek(seekTargetMs: Long) {
                 try {
@@ -183,13 +199,13 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
                 pcmIn = newPcmIn
                 activePcmIn = newPcmIn
                 dataLine.flush()
+                stretcher.reset()
 
-                val frameSize = decodedFormat.frameSize
                 val rawTargetBytes = (seekTargetMs * bytesPerMs).toLong()
-                val targetBytes = if (frameSize > 0) rawTargetBytes - (rawTargetBytes % frameSize) else rawTargetBytes
+                val targetBytes = if (frameBytes > 0) rawTargetBytes - (rawTargetBytes % frameBytes) else rawTargetBytes
 
                 var remainingToSkip = targetBytes
-                val skipBuffer = ByteArray(4096)
+                val skipBuffer = ByteArray(readChunkSize)
                 while (remainingToSkip > 0 && !isStopped.get()) {
                     val skipped = activePcmIn.skip(remainingToSkip)
                     if (skipped <= 0) {
@@ -230,13 +246,23 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
                 val bytesRead = activePcmIn.read(buffer, 0, buffer.size)
                 if (bytesRead == -1) break
 
-                dataLine.write(buffer, 0, bytesRead)
+                val outPcm = stretcher.process(buffer, bytesRead, currentPlaybackSpeed)
+                if (outPcm.isNotEmpty() && !isStopped.get()) {
+                    writeChunkedPcm(dataLine, outPcm, lineBufferSize, frameBytes)
+                }
                 totalBytesRead += bytesRead
-                currentPositionAtomic.set((totalBytesRead / bytesPerMs).toLong())
+                val pendingBytes = stretcher.estimatedPendingInputFrames() * frameBytes
+                currentPositionAtomic.set(((totalBytesRead - pendingBytes).coerceAtLeast(0L) / bytesPerMs).toLong())
             }
 
             if (!isStopped.get()) {
-                dataLine.drain()
+                val tailPcm = stretcher.finish()
+                if (tailPcm.isNotEmpty() && !isStopped.get()) {
+                    writeChunkedPcm(dataLine, tailPcm, lineBufferSize, frameBytes)
+                }
+                if (!isStopped.get()) {
+                    dataLine.drain()
+                }
             }
 
         } catch (e: InterruptedException) {
@@ -264,6 +290,23 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
             if (wasNormal) {
                 onCompletion?.invoke()
             }
+        }
+    }
+
+    private fun writeChunkedPcm(
+        dataLine: SourceDataLine,
+        pcmBytes: ByteArray,
+        maxChunkSize: Int,
+        frameBytes: Int
+    ) {
+        val step = (maxChunkSize - (maxChunkSize % frameBytes)).coerceAtLeast(frameBytes)
+        var offset = 0
+        while (offset < pcmBytes.size && !isStopped.get()) {
+            val len = minOf(step, pcmBytes.size - offset)
+            val alignedLen = len - (len % frameBytes)
+            if (alignedLen <= 0) break
+            dataLine.write(pcmBytes, offset, alignedLen)
+            offset += alignedLen
         }
     }
 

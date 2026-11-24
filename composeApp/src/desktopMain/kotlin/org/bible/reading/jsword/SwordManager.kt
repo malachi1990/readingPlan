@@ -559,26 +559,41 @@ class SwordManager(
      * Extracts readable text content from an OSIS XML DOM while preserving:
      * - Whitespace (tabs, newlines, carriage returns, indentation)
      * - Line breaks (<lb/>)
-     * - Paragraph spacing (<p>)
-     * - Section headings (<title>)
-     * - Lists (<item>)
-     * - Tables (<row>, <cell>)
-     * while excluding non-canonical extra-biblical elements (<note>, <reference>).
+     * - Paragraph spacing (<p>, <title>, <q>, <list>, <table> separated by a single blank line)
+     * - Lists (<item>) and tables (<row>, <cell>)
+     * while ignoring inter-element XML formatting whitespace and empty spacer blocks,
+     * and excluding non-canonical extra-biblical elements (<note>, <reference>).
      */
     private fun extractFormattedKeyContent(root: Element): String {
         return try {
             val sb = StringBuilder()
-            extractFormattedNode(root, sb)
-            val formatted = sb.toString().trim()
+            extractFormattedNode(root, sb, parentIsContainer = true)
+            val formatted = sb.toString()
+                .replace(Regex("""\n(?:[ \t]*\n){2,}"""), "\n\n")
+                .trim()
             if (formatted.isNotEmpty()) formatted else OSISUtil.getCanonicalText(root).trim()
         } catch (_: Exception) {
             OSISUtil.getCanonicalText(root).trim()
         }
     }
 
-    private fun extractFormattedNode(content: Content, sb: StringBuilder) {
+    private fun extractFormattedNode(
+        content: Content,
+        sb: StringBuilder,
+        parentIsContainer: Boolean = false,
+        afterLb: Boolean = false
+    ): Boolean {
         if (content is Text) {
-            sb.append(content.text)
+            var txt = content.text
+            if (parentIsContainer && txt.isBlank()) {
+                return false
+            }
+            if (afterLb) {
+                txt = txt.replace(Regex("""^(?:\r?\n)+[ \t]*"""), "")
+                if (txt.isEmpty()) return true
+            }
+            sb.append(txt)
+            return false
         } else if (content is Element) {
             val name = content.name.lowercase()
 
@@ -586,45 +601,88 @@ class SwordManager(
             if (name == "note" || name == "reference") {
                 val canonical = content.getAttributeValue("canonical")
                 if (!canonical.toBoolean()) {
-                    return
+                    return false
                 }
             }
 
             if (name == "lb") {
-                if (sb.isEmpty() || sb.last() != '\n') {
-                    sb.append('\n')
-                }
-                return
+                sb.append('\n')
+                return true
             }
 
-            val isBlock = name == "p" || name == "title" || name == "q" || name == "item" || name == "row"
+            val isParagraphBlock = name == "p" || name == "title" || name == "q" || name == "list" || name == "table"
+            val isLineBlock = name == "item" || name == "row"
+            val isBlock = isParagraphBlock || isLineBlock
 
-            if (isBlock && sb.isNotEmpty() && sb.last() != '\n') {
-                if (name == "p" || name == "title" || name == "q") {
-                    if (sb.length > 1 && sb[sb.length - 2] != '\n') {
-                        sb.append("\n\n")
-                    } else {
-                        sb.append("\n")
-                    }
-                } else {
-                    sb.append("\n")
+            val isContainer = name == "osis" || name == "osistext" || name == "body" ||
+                name == "div" || name == "list" || name == "table" || name == "row" ||
+                (name == "q" && content.children.any {
+                    it.name.lowercase() in setOf("p", "title", "q", "list", "table", "div")
+                })
+
+            if (isBlock) {
+                val childSb = StringBuilder()
+                var childAfterLb = false
+                for (child in content.content) {
+                    childAfterLb = extractFormattedNode(
+                        child,
+                        childSb,
+                        parentIsContainer = isContainer,
+                        afterLb = childAfterLb
+                    )
                 }
+
+                val childStr = childSb.toString().trimStart('\r', '\n')
+                if (childStr.replace("\u00A0", "").isBlank()) {
+                    return false
+                }
+
+                val requiredNewlines = if (isParagraphBlock) 2 else 1
+                if (sb.isNotEmpty()) {
+                    ensureTrailingNewlines(sb, requiredNewlines)
+                }
+                sb.append(childStr)
+                ensureTrailingNewlines(sb, requiredNewlines)
+                return false
             }
 
+            var childAfterLb = false
             for (child in content.content) {
-                extractFormattedNode(child, sb)
+                childAfterLb = extractFormattedNode(
+                    child,
+                    sb,
+                    parentIsContainer = isContainer,
+                    afterLb = childAfterLb
+                )
             }
 
-            if (name == "cell") {
+            if (name == "cell" && (sb.isEmpty() || sb.last() != '\t')) {
                 sb.append('\t')
             }
+        }
+        return false
+    }
 
-            if (isBlock && sb.isNotEmpty() && sb.last() != '\n') {
-                if (name == "p" || name == "title" || name == "q") {
-                    sb.append("\n\n")
-                } else {
-                    sb.append("\n")
-                }
+    private fun ensureTrailingNewlines(sb: StringBuilder, count: Int) {
+        if (sb.isEmpty()) return
+        var idx = sb.length - 1
+        while (idx >= 0 && (sb[idx] == ' ' || sb[idx] == '\t' || sb[idx] == '\r')) {
+            idx--
+        }
+        if (idx < sb.length - 1 && idx >= 0 && sb[idx] == '\n') {
+            sb.setLength(idx + 1)
+        }
+        if (sb.isEmpty()) return
+
+        var existingNewlines = 0
+        var i = sb.length - 1
+        while (i >= 0 && sb[i] == '\n') {
+            existingNewlines++
+            i--
+        }
+        if (existingNewlines < count) {
+            repeat(count - existingNewlines) {
+                sb.append('\n')
             }
         }
     }

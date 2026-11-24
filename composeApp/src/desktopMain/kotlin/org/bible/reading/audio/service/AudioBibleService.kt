@@ -36,7 +36,10 @@ class AudioBibleService(
     var preferences by mutableStateOf(preferencesManager.loadPreferences())
         private set
 
-    val player = AudioBiblePlayer(initialVolume = preferences.volume)
+    val player = AudioBiblePlayer(
+        initialVolume = preferences.volume,
+        initialPlaybackSpeed = preferences.playbackSpeed
+    )
 
     // Current active strategy
     var currentStrategy: AudioFilenameStrategy by mutableStateOf(
@@ -63,6 +66,13 @@ class AudioBibleService(
     private var rescanJob: Job? = null
 
     init {
+        player.onPlaybackSpeedChanged = { speed ->
+            if (preferences.playbackSpeed != speed) {
+                val updated = preferences.copy(playbackSpeed = speed)
+                preferences = updated
+                preferencesManager.savePreferences(updated)
+            }
+        }
         applyPreferences(preferences)
     }
 
@@ -70,6 +80,7 @@ class AudioBibleService(
         preferences = newPrefs
         preferencesManager.savePreferences(newPrefs)
         player.setVolumeLevel(newPrefs.volume)
+        player.setPlaybackSpeed(newPrefs.playbackSpeed)
         player.autoPlayNext = newPrefs.autoPlayNext
 
         // If custom regex strategy, configure custom parameters
@@ -194,7 +205,7 @@ class AudioBibleService(
     }
 
     fun hasAudioForReading(reading: Reading): Boolean {
-        val book = BibleBookMatcher.matchBook(reading.book) ?: return null ?: false
+        val book = BibleBookMatcher.matchBook(reading.book) ?: return false
         return synchronized(audioIndex) { audioIndex.containsKey(book to reading.chapterNumber) }
     }
 

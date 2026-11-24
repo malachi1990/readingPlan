@@ -2,6 +2,7 @@ package org.bible.reading.ui
 
 import org.bible.reading.dto.Bible
 import java.io.File
+import java.nio.file.Files
 import java.time.DayOfWeek
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -11,9 +12,13 @@ import kotlin.test.assertTrue
 
 class PlanStateJSwordIntegrationTest {
 
+    private fun tempPlanDir(): File = Files.createTempDirectory("plan_state_jsword_test").toFile().apply {
+        deleteOnExit()
+    }
+
     @Test
     fun testAppFolderCreationAndConfig() {
-        val state = PlanState()
+        val state = PlanState(planStorageDir = tempPlanDir())
         val expectedDir = File(System.getProperty("user.home"), ".bibleReadingPlan")
         assertEquals(expectedDir.absolutePath, state.swordManager.appDir.absolutePath)
         assertTrue(state.swordManager.appDir.exists())
@@ -21,7 +26,7 @@ class PlanStateJSwordIntegrationTest {
 
     @Test
     fun testDownloadDialogState() {
-        val state = PlanState()
+        val state = PlanState(planStorageDir = tempPlanDir())
         assertFalse(state.showDownloadDialog)
         state.showDownloadDialog = true
         assertTrue(state.showDownloadDialog)
@@ -31,7 +36,7 @@ class PlanStateJSwordIntegrationTest {
 
     @Test
     fun testClickDailyReadingOpensViewAndNavigates() {
-        val state = PlanState()
+        val state = PlanState(planStorageDir = tempPlanDir())
         state.selectedStrategyChoice = PlanStrategyChoice.SIMPLE_SEQUENTIAL
         state.chaptersPerDay = 3
         val plan = state.generatePlan()
@@ -56,7 +61,7 @@ class PlanStateJSwordIntegrationTest {
 
     @Test
     fun testDailyReadingPassageResolution() {
-        val state = PlanState()
+        val state = PlanState(planStorageDir = tempPlanDir())
         state.clearDay(DayOfWeek.MONDAY)
         state.addBookToDay(DayOfWeek.MONDAY, Bible.JONAH)
         val plan = state.generatePlan()

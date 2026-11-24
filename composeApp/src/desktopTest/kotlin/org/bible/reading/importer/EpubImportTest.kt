@@ -17,6 +17,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -171,6 +172,75 @@ class EpubImportTest {
         return tempFile
     }
 
+    private fun createMessyParagraphSpacingEpub(): File {
+        val tempFile = File.createTempFile("messy_spacing_book", ".epub")
+        tempFile.deleteOnExit()
+
+        ZipOutputStream(FileOutputStream(tempFile)).use { zos ->
+            zos.putNextEntry(ZipEntry("mimetype"))
+            zos.write("application/epub+zip".toByteArray(Charsets.US_ASCII))
+            zos.closeEntry()
+
+            zos.putNextEntry(ZipEntry("META-INF/container.xml"))
+            val containerXml = """<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+    <rootfiles>
+        <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+    </rootfiles>
+</container>""".trimIndent()
+            zos.write(containerXml.toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+
+            zos.putNextEntry(ZipEntry("OEBPS/content.opf"))
+            val opfContent = """<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Paragraph Spacing Book</dc:title>
+    <dc:creator>Test Author</dc:creator>
+    <dc:language>en</dc:language>
+    <dc:identifier id="BookId">urn:uuid:para-spacing-123</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="c1"/>
+  </spine>
+</package>""".trimIndent()
+            zos.write(opfContent.toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+
+            zos.putNextEntry(ZipEntry("OEBPS/ch1.xhtml"))
+            val ch1Content = "<!DOCTYPE html>\r\n" +
+                "<html xmlns=\"http://www.w3.org/1999/xhtml\">\r\n" +
+                "<head><title>Sermon One</title></head>\r\n" +
+                "<body>\r\n" +
+                "  <h2 class=\"centered\">&nbsp;</h2>\r\n" +
+                "  <p class=\"calibre5\">\u00A0</p>\r\n" +
+                "  <h3>Sermon One</h3>\r\n" +
+                "  <blockquote>\r\n" +
+                "    <p>Quote paragraph text.<br/>\r\n" +
+                "    Reference 1:1</p>\r\n" +
+                "  </blockquote>\r\n" +
+                "  <p>First real paragraph.</p>\r\n" +
+                "\t\t\t\r\n" +
+                "  <p class=\"calibre5\"></p>\r\n" +
+                "  <p class=\"calibre5\">&nbsp;</p>\r\n" +
+                "  <strong class=\"calibre6\"> </strong>\r\n" +
+                "  <p class=\"calibre5\"><br/></p>\r\n" +
+                "  <p>Second real paragraph.</p>\r\n\r\n\r\n" +
+                "  <div>\r\n" +
+                "    <p>Third real paragraph.</p>\r\n" +
+                "  </div>\r\n" +
+                "</body>\r\n" +
+                "</html>"
+            zos.write(ch1Content.toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+        }
+
+        return tempFile
+    }
+
     @Test
     fun testBookImportRegistry() {
         val epubFile = createSyntheticEpub()
@@ -260,6 +330,35 @@ class EpubImportTest {
     }
 
     @Test
+    fun testOsisConverterSingleNewlineBetweenParagraphs() {
+        val rawHtml = "  <h2 class=\"centered\">&nbsp;</h2>\r\n" +
+            "  <p class=\"calibre5\">\u00A0</p>\r\n" +
+            "  <h1>Title</h1>\r\n\r\n" +
+            "  <p>First paragraph.</p>\r\n" +
+            "\t\t\r\n" +
+            "  <p></p>\r\n" +
+            "  <p>&nbsp;</p>\r\n" +
+            "  <strong class=\"calibre6\"> </strong>\r\n" +
+            "  <p>Second paragraph.</p>\r\n\r\n" +
+            "  <div>\r\n    <p>Third paragraph.</p>\r\n  </div>\r\n"
+
+        val section = OsisConverter.toOsisSection(
+            ImportedChapter(id = "c1", title = "Title", rawContent = rawHtml, order = 1)
+        )
+
+        val expected = """
+<div type="section" osisID="c1">
+<title canonical="true" level="1">Title</title>
+<p>First paragraph.</p>
+<p>Second paragraph.</p>
+<p>Third paragraph.</p>
+</div>
+        """.trimIndent()
+
+        assertEquals(expected, section)
+    }
+
+    @Test
     fun testPreserveWhitespaceAndFormattingInOsisConverter() {
         // Test tabs, newlines, carriage returns, <pre>, <br with attributes>, lists, and entities
         val rawHtml = "<pre>\tdef foo():\r\n\t\treturn 42\n</pre>\n" +
@@ -286,7 +385,7 @@ class EpubImportTest {
         // 3. Carriage returns preserved (encoded as &#13; so W3C XML parsers don't normalize them to \n)
         assertTrue(osisSection.contains("&#13;"))
 
-        // 4. <br class="calibre4"/> preserved as <lb/>\n
+        // 4. <br class="calibre4"/> preserved as <lb/>
         assertTrue(osisSection.contains("<lb/>\nLine 2") || osisSection.contains("<lb/>"))
 
         // 5. Preformatted text preserved in <p>
@@ -325,15 +424,53 @@ class EpubImportTest {
 
         // 3. Verify newlines (\n) are preserved between paragraphs and lines
         assertTrue(content.contains("\n"), "Content must preserve newlines")
-        assertTrue(content.contains("followed by second line\nand third line") || content.contains("Line with break\n"),
-            "Content must preserve line breaks (<br/>)")
+        assertTrue(
+            content.contains("followed by second line\nand third line"),
+            "Content must preserve single line breaks (<br/>) without extra blank lines"
+        )
 
         // 4. Verify carriage returns (\r) are preserved
         assertTrue(content.contains("\r"), "Content must preserve carriage returns (\\r)")
 
         // 5. Verify lists are formatted with items on separate lines
-        assertTrue(content.contains("First item"), "Content must preserve list item 1")
-        assertTrue(content.contains("Second item"), "Content must preserve list item 2")
+        assertTrue(content.contains("First item\nSecond item"), "Content must preserve list items on consecutive lines")
+
+        // 6. Verify no triple newlines or whitespace-only blank lines exist
+        assertFalse(
+            Regex("""\n[ \t]*\n[ \t]*\n""").containsMatchIn(content),
+            "Content must not contain multiple consecutive blank lines:\n$content"
+        )
+    }
+
+    @Test
+    fun testEndToEndParagraphSpacingInSwordModule() = runBlocking {
+        val epub = createMessyParagraphSpacingEpub()
+        val tempSwordDir = Files.createTempDirectory("sword_para_spacing_app_dir").toFile()
+        tempSwordDir.deleteOnExit()
+
+        val manager = SwordManager(appDir = tempSwordDir)
+        val result = manager.importBook(epub)
+        assertTrue(result.isSuccess, "Import should succeed: ${result.exceptionOrNull()?.message}")
+        val book = result.getOrThrow()
+
+        // Verify .bdt file itself has clean </p>\n<p> with no multi-line whitespace
+        val initialsLower = book.initials.lowercase()
+        val bdtFile = File(tempSwordDir, "modules/genbook/rawgenbook/$initialsLower/$initialsLower.bdt")
+        val bdtXml = bdtFile.readText(Charsets.UTF_8)
+        assertFalse(bdtXml.contains("</p>\n\n"), "BDT XML should not contain multiple newlines after </p>: $bdtXml")
+        assertTrue(bdtXml.contains("</p>\n<p>"), "BDT XML should separate paragraphs with a single newline: $bdtXml")
+
+        // Verify rendered content via SwordManager has exactly one blank line (\n\n) between paragraphs
+        val key = manager.getBookKeys(book).first()
+        val content = manager.readKeyContent(book, key)
+
+        val expectedContent = "Sermon One\n\n" +
+            "Quote paragraph text.\nReference 1:1\n\n" +
+            "First real paragraph.\n\n" +
+            "Second real paragraph.\n\n" +
+            "Third real paragraph."
+
+        assertEquals(expectedContent, content)
     }
 
     @Test
@@ -405,12 +542,21 @@ class EpubImportTest {
         // Read content of Chapter 1
         val ch1Key = keys.first { it.name.contains("Chapter 1") }
         val ch1Content = manager.readKeyContent(book, ch1Key)
-        assertTrue(ch1Content.contains("wilderness of this world"), "Chapter 1 content should contain expected text")
+        assertEquals(
+            "Chapter 1: The Den\n\n" +
+                "As I walked through the wilderness of this world, I lighted on a certain place where was a Den.\n\n" +
+                "And I laid me down in that place to sleep: and, as I slept, I dreamed a dream.",
+            ch1Content
+        )
 
         // Read content of Chapter 2
         val ch2Key = keys.first { it.name.contains("Chapter 2") }
         val ch2Content = manager.readKeyContent(book, ch2Key)
         assertTrue(ch2Content.contains("miry slough"), "Chapter 2 content should contain expected text")
+        assertFalse(
+            Regex("""\n[ \t]*\n[ \t]*\n""").containsMatchIn(ch2Content),
+            "Chapter 2 content must not contain multiple blank lines"
+        )
     }
 
     @Test
@@ -459,11 +605,7 @@ class EpubImportTest {
         if (!calvinFile.exists()) return@runBlocking
 
         val imported = EpubReader.parse(calvinFile)
-        println("=== Imported Book Chapters ===")
-        println("Total parsed chapters: " + imported.chapters.size)
-        for (ch in imported.chapters) {
-            println("  Chapter id: " + ch.id + " | title: " + ch.title + " | length: " + ch.rawContent.length)
-        }
+        assertTrue(imported.chapters.isNotEmpty())
 
         val tempSwordDir = Files.createTempDirectory("sword_calvin_test").toFile()
         tempSwordDir.deleteOnExit()
@@ -473,10 +615,15 @@ class EpubImportTest {
         val book = result.getOrThrow()
 
         val keys = manager.getBookKeys(book)
-        println("=== JSword Keys for Module " + book.initials + " ===")
-        println("Total keys returned: " + keys.size)
-        for (k in keys) {
-            println("  Key name: " + k.name)
+        assertTrue(keys.isNotEmpty())
+
+        // Verify no section in the real EPUB has multiple consecutive blank lines
+        for (k in keys.take(10)) {
+            val content = manager.readKeyContent(book, k)
+            assertFalse(
+                Regex("""\n[ \t]*\n[ \t]*\n""").containsMatchIn(content),
+                "Section '${k.name}' should not have multiple consecutive blank lines"
+            )
         }
     }
 }

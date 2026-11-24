@@ -3,16 +3,20 @@ package org.bible.reading.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -29,6 +33,7 @@ import org.bible.reading.tts.TtsTextCleaner
 import org.bible.reading.tts.ui.TtsFileUtils
 import org.crosswire.jsword.book.Book
 import org.crosswire.jsword.book.BookCategory
+import org.crosswire.jsword.book.basic.AbstractPassageBook
 import org.crosswire.jsword.book.sword.SwordBookMetaData
 import org.crosswire.jsword.passage.Key
 import java.awt.Toolkit
@@ -94,10 +99,10 @@ fun FurtherStudyView(
     // Notes panel toggle
     var isNotesMode by remember { mutableStateOf(false) }
 
-    // Check if the current module is verse-based
+    // Check if the current module is verse-based (commentaries/devotionals only if backed by a passage driver)
     val isVerseBasedModule = selectedModule?.bookCategory == BookCategory.BIBLE ||
-            selectedModule?.bookCategory == BookCategory.COMMENTARY ||
-            selectedModule?.bookCategory == BookCategory.DAILY_DEVOTIONS
+            (selectedModule?.bookCategory == BookCategory.COMMENTARY && selectedModule is AbstractPassageBook) ||
+            (selectedModule?.bookCategory == BookCategory.DAILY_DEVOTIONS && selectedModule is AbstractPassageBook)
 
     // Module TOC: list of books for verse-based modules, sourced from the module's versification.
     // Recomputed whenever the selected module changes.
@@ -132,17 +137,17 @@ fun FurtherStudyView(
     var quickRefInput by remember { mutableStateOf("") }
     var quickRefError by remember { mutableStateOf<String?>(null) }
 
-    // General Book navigation state (for tree-based books)
+    // General Book navigation state (for tree/key-based books)
     var genBookKeys by remember(selectedModule) {
         mutableStateOf<List<Key>>(emptyList())
     }
     var selectedKeyIndex by remember(selectedModule) { mutableStateOf(0) }
     var genBookSearchQuery by remember { mutableStateOf("") }
 
-    // Fetch keys when a general book or dictionary is selected
+    // Fetch keys when a non-verse-based module (General Book, Dictionary, Devotional, etc.) is selected
     LaunchedEffect(selectedModule) {
         val mod = selectedModule
-        if (mod != null && (mod.bookCategory == BookCategory.GENERAL_BOOK || mod.bookCategory == BookCategory.DICTIONARY)) {
+        if (mod != null && !isVerseBasedModule) {
             genBookKeys = manager.getBookKeys(mod)
             selectedKeyIndex = 0
         } else {
@@ -248,29 +253,6 @@ fun FurtherStudyView(
                                 ) {
                                     Text("ℹ Module Info", fontSize = 12.sp)
                                 }
-                            }
-
-                            // Import external book(s) (EPUB, PDF) button
-                            OutlinedButton(
-                                onClick = {
-                                    openBooksFileChooser { files ->
-                                        importingFiles = files
-                                    }
-                                },
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                modifier = Modifier.height(36.dp)
-                            ) {
-                                Text("📥 Import Books", fontSize = 12.sp)
-                            }
-
-                            // Download more modules shortcut
-                            Button(
-                                onClick = onOpenDownload,
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                modifier = Modifier.height(36.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-                            ) {
-                                Text("📚 Downloader", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                             }
                         }
                     }
@@ -1005,6 +987,8 @@ fun FurtherStudyView(
                                         isReading = isPrimaryReading,
                                         isSynthesizing = isPrimarySynthesizing,
                                         isQueued = isPrimaryQueued,
+                                        ttsService = ttsService,
+                                        audioPlayer = audioPlayer,
                                         onReadPassage = {
                                             ttsService.readPassage(primaryPassage, selectedModule!!, audioPlayer)
                                         },
@@ -1059,6 +1043,8 @@ fun FurtherStudyView(
                                         isReading = isSecondaryReading,
                                         isSynthesizing = isSecondarySynthesizing,
                                         isQueued = isSecondaryQueued,
+                                        ttsService = ttsService,
+                                        audioPlayer = audioPlayer,
                                         onReadPassage = {
                                             ttsService.readPassage(secondaryPassage, secondaryModule!!, audioPlayer)
                                         },
@@ -1132,6 +1118,8 @@ fun FurtherStudyView(
                                         isReading = isPrimaryReading,
                                         isSynthesizing = isPrimarySynthesizing,
                                         isQueued = isPrimaryQueued,
+                                        ttsService = ttsService,
+                                        audioPlayer = audioPlayer,
                                         onReadPassage = {
                                             ttsService.readPassage(primaryPassage, selectedModule!!, audioPlayer)
                                         },
@@ -1183,11 +1171,19 @@ fun FurtherStudyView(
                 } else {
                     // General Book / Dictionary Reading Surface
                     val activeKey = genBookKeys.getOrNull(selectedKeyIndex)
+                    val hasActiveKeyContent = selectedModule != null && activeKey != null
                     val keyContent = remember(selectedModule, activeKey) {
                         if (selectedModule != null && activeKey != null) {
                             manager.readKeyContent(selectedModule!!, activeKey)
                         } else {
                             "No content available for this selection."
+                        }
+                    }
+                    val paragraphs = remember(keyContent, hasActiveKeyContent) {
+                        if (hasActiveKeyContent) {
+                            TtsTextCleaner.splitIntoParagraphs(keyContent)
+                        } else {
+                            emptyList()
                         }
                     }
 
@@ -1317,18 +1313,64 @@ fun FurtherStudyView(
 
                                 HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
 
-                                // Text content
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .verticalScroll(rememberScrollState())
-                                ) {
-                                    Text(
-                                        text = keyContent,
-                                        fontSize = fontSizeSp.sp,
-                                        lineHeight = (fontSizeSp + 8).sp,
-                                        modifier = Modifier.padding(bottom = 32.dp)
-                                    )
+                                // Paragraph-by-paragraph text content with per-paragraph TTS options
+                                if (!hasActiveKeyContent || paragraphs.isEmpty()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .verticalScroll(rememberScrollState())
+                                    ) {
+                                        Text(
+                                            text = keyContent,
+                                            fontSize = fontSizeSp.sp,
+                                            lineHeight = (fontSizeSp + 8).sp,
+                                            modifier = Modifier.padding(bottom = 32.dp)
+                                        )
+                                    }
+                                } else {
+                                    val sectionTitle = activeKey?.name ?: "Section"
+                                    val moduleSubtitle = selectedModule?.name ?: ""
+                                    val paragraphListState = remember(selectedModule, activeKey) { LazyListState() }
+
+                                    LazyColumn(
+                                        state = paragraphListState,
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentPadding = PaddingValues(bottom = 32.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        itemsIndexed(paragraphs) { index, paragraph ->
+                                            val trackTitle = ttsService.buildParagraphTrackTitle(
+                                                sectionTitle = sectionTitle,
+                                                subtitle = moduleSubtitle,
+                                                paragraphIndex = index
+                                            )
+                                            ParagraphTtsRow(
+                                                paragraphText = paragraph,
+                                                fontSizeSp = fontSizeSp,
+                                                trackTitle = trackTitle,
+                                                ttsService = ttsService,
+                                                audioPlayer = audioPlayer,
+                                                onReadParagraph = {
+                                                    ttsService.readParagraph(
+                                                        sectionTitle = sectionTitle,
+                                                        subtitle = moduleSubtitle,
+                                                        paragraphIndex = index,
+                                                        paragraphText = paragraph,
+                                                        player = audioPlayer
+                                                    )
+                                                },
+                                                onQueueParagraph = {
+                                                    ttsService.queueParagraph(
+                                                        sectionTitle = sectionTitle,
+                                                        subtitle = moduleSubtitle,
+                                                        paragraphIndex = index,
+                                                        paragraphText = paragraph,
+                                                        player = audioPlayer
+                                                    )
+                                                }
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1374,6 +1416,93 @@ fun FurtherStudyView(
 }
 
 @Composable
+private fun ParagraphTtsRow(
+    paragraphText: String,
+    fontSizeSp: Int,
+    trackTitle: String,
+    ttsService: TtsService,
+    audioPlayer: AudioBiblePlayer,
+    onReadParagraph: () -> Unit,
+    onQueueParagraph: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isSynthesizing = ttsService.isSynthesizing && ttsService.currentReadingTitle == trackTitle
+    val isActive = audioPlayer.isTrackActive(trackTitle)
+    val isActivelyPlaying = audioPlayer.isActivelyPlaying(trackTitle)
+    val isQueued = audioPlayer.isTrackQueued(trackTitle)
+    val isSpeakable = remember(paragraphText) {
+        TtsTextCleaner.cleanForSpeech(paragraphText).any { it.isLetterOrDigit() }
+    }
+
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(6.dp),
+        color = if (isActive || isSynthesizing) {
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
+        } else {
+            Color.Transparent
+        }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 6.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(modifier = Modifier.weight(1f)) {
+                SelectionContainer {
+                    Text(
+                        text = paragraphText,
+                        fontSize = fontSizeSp.sp,
+                        lineHeight = (fontSizeSp + 8).sp
+                    )
+                }
+            }
+
+            if (isSpeakable) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    IconButton(
+                        onClick = onReadParagraph,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        when {
+                            isSynthesizing -> CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            isActivelyPlaying -> Text("⏸", fontSize = 12.sp)
+                            isActive -> Text("▶", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                            else -> Text("🔊", fontSize = 12.sp)
+                        }
+                    }
+
+                    IconButton(
+                        onClick = onQueueParagraph,
+                        enabled = !isQueued,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Text(
+                            text = if (isQueued) "✓" else "➕",
+                            fontSize = 11.sp,
+                            color = if (isQueued) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                LocalContentColor.current.copy(alpha = 0.75f)
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun PassageCardContent(
     passage: ChapterPassage,
     book: Book,
@@ -1382,6 +1511,8 @@ private fun PassageCardContent(
     isReading: Boolean = false,
     isSynthesizing: Boolean = false,
     isQueued: Boolean = false,
+    ttsService: TtsService? = null,
+    audioPlayer: AudioBiblePlayer? = null,
     onReadPassage: () -> Unit = {},
     onQueuePassage: (() -> Unit)? = null,
     onSavePassageAudio: (() -> Unit)? = null,
@@ -1490,17 +1621,67 @@ private fun PassageCardContent(
                 }
             }
         } else if (passage.verses.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-            ) {
-                Text(
-                    text = passage.fullText.ifBlank { "No text available for this passage." },
-                    fontSize = fontSizeSp.sp,
-                    lineHeight = (fontSizeSp + 8).sp,
-                    modifier = Modifier.padding(bottom = 24.dp)
-                )
+            val fullTextParagraphs = remember(passage.fullText, book.bookCategory) {
+                if (book.bookCategory != BookCategory.BIBLE) {
+                    TtsTextCleaner.splitIntoParagraphs(passage.fullText)
+                } else {
+                    emptyList()
+                }
+            }
+
+            if (book.bookCategory != BookCategory.BIBLE && fullTextParagraphs.isNotEmpty() && ttsService != null && audioPlayer != null) {
+                val sectionTitle = "${passage.bookName} ${passage.chapterNumber}"
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 24.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    itemsIndexed(fullTextParagraphs) { index, paragraph ->
+                        val trackTitle = ttsService.buildParagraphTrackTitle(
+                            sectionTitle = sectionTitle,
+                            subtitle = book.name,
+                            paragraphIndex = index
+                        )
+                        ParagraphTtsRow(
+                            paragraphText = paragraph,
+                            fontSizeSp = fontSizeSp,
+                            trackTitle = trackTitle,
+                            ttsService = ttsService,
+                            audioPlayer = audioPlayer,
+                            onReadParagraph = {
+                                ttsService.readParagraph(
+                                    sectionTitle = sectionTitle,
+                                    subtitle = book.name,
+                                    paragraphIndex = index,
+                                    paragraphText = paragraph,
+                                    player = audioPlayer
+                                )
+                            },
+                            onQueueParagraph = {
+                                ttsService.queueParagraph(
+                                    sectionTitle = sectionTitle,
+                                    subtitle = book.name,
+                                    paragraphIndex = index,
+                                    paragraphText = paragraph,
+                                    player = audioPlayer
+                                )
+                            }
+                        )
+                    }
+                }
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        text = passage.fullText.ifBlank { "No text available for this passage." },
+                        fontSize = fontSizeSp.sp,
+                        lineHeight = (fontSizeSp + 8).sp,
+                        modifier = Modifier.padding(bottom = 24.dp)
+                    )
+                }
             }
         } else {
             val listState = rememberLazyListState()
@@ -1518,36 +1699,108 @@ private fun PassageCardContent(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(displayedVerses) { verse ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.Top
-                    ) {
-                        if (verse.verseNumber > 0) {
-                            Text(
-                                text = "${verse.verseNumber}",
-                                fontSize = (fontSizeSp - 3).sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .width(36.dp)
-                                    .padding(top = 2.dp)
-                            )
+                    val verseParagraphs = remember(verse.text, book.bookCategory) {
+                        if (book.bookCategory != BookCategory.BIBLE) {
+                            TtsTextCleaner.splitIntoParagraphs(verse.text)
                         } else {
-                            Spacer(Modifier.width(36.dp))
+                            emptyList()
                         }
+                    }
 
-                        Text(
-                            text = verse.text,
-                            fontSize = fontSizeSp.sp,
-                            lineHeight = (fontSizeSp + 8).sp,
-                            modifier = Modifier.weight(1f)
-                        )
-
-                        IconButton(
-                            onClick = { onReadVerse(verse.verseNumber, verse.text) },
-                            modifier = Modifier.size(28.dp)
+                    if (book.bookCategory != BookCategory.BIBLE && verseParagraphs.size > 1 && ttsService != null && audioPlayer != null) {
+                        val entryTitle = if (verse.verseNumber > 0) {
+                            "${passage.bookName} ${passage.chapterNumber}:${verse.verseNumber}"
+                        } else {
+                            "${passage.bookName} ${passage.chapterNumber}"
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.Top
                         ) {
-                            Text("🔊", fontSize = 12.sp)
+                            if (verse.verseNumber > 0) {
+                                Text(
+                                    text = "${verse.verseNumber}",
+                                    fontSize = (fontSizeSp - 3).sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .width(36.dp)
+                                        .padding(top = 6.dp)
+                                )
+                            } else {
+                                Spacer(Modifier.width(36.dp))
+                            }
+
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                verseParagraphs.forEachIndexed { idx, paragraph ->
+                                    val trackTitle = ttsService.buildParagraphTrackTitle(
+                                        sectionTitle = entryTitle,
+                                        subtitle = book.name,
+                                        paragraphIndex = idx
+                                    )
+                                    ParagraphTtsRow(
+                                        paragraphText = paragraph,
+                                        fontSizeSp = fontSizeSp,
+                                        trackTitle = trackTitle,
+                                        ttsService = ttsService,
+                                        audioPlayer = audioPlayer,
+                                        onReadParagraph = {
+                                            ttsService.readParagraph(
+                                                sectionTitle = entryTitle,
+                                                subtitle = book.name,
+                                                paragraphIndex = idx,
+                                                paragraphText = paragraph,
+                                                player = audioPlayer
+                                            )
+                                        },
+                                        onQueueParagraph = {
+                                            ttsService.queueParagraph(
+                                                sectionTitle = entryTitle,
+                                                subtitle = book.name,
+                                                paragraphIndex = idx,
+                                                paragraphText = paragraph,
+                                                player = audioPlayer
+                                            )
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            if (verse.verseNumber > 0) {
+                                Text(
+                                    text = "${verse.verseNumber}",
+                                    fontSize = (fontSizeSp - 3).sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .width(36.dp)
+                                        .padding(top = 2.dp)
+                                )
+                            } else {
+                                Spacer(Modifier.width(36.dp))
+                            }
+
+                            Text(
+                                text = verse.text,
+                                fontSize = fontSizeSp.sp,
+                                lineHeight = (fontSizeSp + 8).sp,
+                                modifier = Modifier.weight(1f)
+                            )
+
+                            IconButton(
+                                onClick = { onReadVerse(verse.verseNumber, verse.text) },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Text("🔊", fontSize = 12.sp)
+                            }
                         }
                     }
                 }

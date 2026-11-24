@@ -12,7 +12,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.bible.reading.audio.player.AudioBiblePlayer
+import org.bible.reading.audio.player.MAX_PLAYBACK_SPEED
+import org.bible.reading.audio.player.MIN_PLAYBACK_SPEED
 import org.bible.reading.tts.ui.TtsFileUtils
+import java.util.Locale
+import kotlin.math.abs
 
 @Composable
 fun AudioPlayerBar(
@@ -26,6 +30,7 @@ fun AudioPlayerBar(
     if (track == null && !isSynthesizing) return
 
     var showPlaylistMenu by remember { mutableStateOf(false) }
+    var showSpeedMenu by remember { mutableStateOf(false) }
 
     Surface(
         modifier = modifier
@@ -275,7 +280,7 @@ fun AudioPlayerBar(
                     )
                 }
 
-                // Bottom Row: Playback Controls & Volume
+                // Bottom Row: Playback Controls, Playback Speed (0.25x..2.00x in 5% steps), & Volume
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -333,24 +338,224 @@ fun AudioPlayerBar(
                         }
                     }
 
-                    // Volume slider
+                    // Playback Speed Stepper + Popover & Volume Slider
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.widthIn(max = 200.dp)
+                        horizontalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        Text(if (player.volume <= 0.001f) "🔇" else if (player.volume < 0.5f) "🔉" else "🔊", fontSize = 14.sp)
-                        Slider(
-                            value = player.volume,
-                            onValueChange = { player.setVolumeLevel(it) },
-                            valueRange = 0f..1f,
-                            modifier = Modifier.weight(1f)
+                        PlaybackSpeedControl(
+                            speed = player.playbackSpeed,
+                            expanded = showSpeedMenu,
+                            onExpandedChange = { showSpeedMenu = it },
+                            onDecrease = { player.decreasePlaybackSpeed() },
+                            onIncrease = { player.increasePlaybackSpeed() },
+                            onSpeedSelect = { player.setPlaybackSpeed(it) },
+                            onReset = { player.resetPlaybackSpeed() }
                         )
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.widthIn(min = 130.dp, max = 180.dp)
+                        ) {
+                            Text(if (player.volume <= 0.001f) "🔇" else if (player.volume < 0.5f) "🔉" else "🔊", fontSize = 14.sp)
+                            Slider(
+                                value = player.volume,
+                                onValueChange = { player.setVolumeLevel(it) },
+                                valueRange = 0f..1f,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun PlaybackSpeedControl(
+    speed: Float,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onDecrease: () -> Unit,
+    onIncrease: () -> Unit,
+    onSpeedSelect: (Float) -> Unit,
+    onReset: () -> Unit
+) {
+    val isCustomSpeed = abs(speed - 1.0f) >= 0.01f
+    val speedLabel = formatSpeed(speed)
+
+    Box {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            FilledTonalIconButton(
+                onClick = onDecrease,
+                enabled = speed > MIN_PLAYBACK_SPEED + 0.005f,
+                modifier = Modifier.size(28.dp)
+            ) {
+                Text("−", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            }
+
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = if (isCustomSpeed) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.secondaryContainer
+                },
+                modifier = Modifier
+                    .height(28.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onExpandedChange(true) }
+            ) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.padding(horizontal = 8.dp)
+                ) {
+                    Text(
+                        text = speedLabel,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isCustomSpeed) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSecondaryContainer
+                        }
+                    )
+                }
+            }
+
+            FilledTonalIconButton(
+                onClick = onIncrease,
+                enabled = speed < MAX_PLAYBACK_SPEED - 0.005f,
+                modifier = Modifier.size(28.dp)
+            ) {
+                Text("+", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { onExpandedChange(false) }
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(340.dp)
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Playback Speed: $speedLabel",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    TextButton(
+                        onClick = onReset,
+                        enabled = isCustomSpeed,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        modifier = Modifier.height(26.dp)
+                    ) {
+                        Text("Reset 1.00x", fontSize = 11.sp)
+                    }
+                }
+
+                // 0.25x to 2.00x in 0.05x (5%) steps -> 35 intervals => 34 intermediate steps
+                Slider(
+                    value = speed,
+                    onValueChange = { onSpeedSelect(it) },
+                    valueRange = MIN_PLAYBACK_SPEED..MAX_PLAYBACK_SPEED,
+                    steps = 34,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("0.25x", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("1.00x", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("2.00x", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = onDecrease,
+                        enabled = speed > MIN_PLAYBACK_SPEED + 0.005f,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        modifier = Modifier.weight(1f).height(28.dp)
+                    ) {
+                        Text("−5%", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    OutlinedButton(
+                        onClick = onIncrease,
+                        enabled = speed < MAX_PLAYBACK_SPEED - 0.005f,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        modifier = Modifier.weight(1f).height(28.dp)
+                    ) {
+                        Text("+5%", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+
+                HorizontalDivider()
+
+                val presets = listOf(0.25f, 0.50f, 0.75f, 1.00f, 1.25f, 1.50f, 2.00f)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    presets.forEach { preset ->
+                        val selected = abs(speed - preset) < 0.01f
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = if (selected) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(26.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable {
+                                    onSpeedSelect(preset)
+                                }
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = formatSpeed(preset),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    color = if (selected) {
+                                        MaterialTheme.colorScheme.onPrimary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun formatSpeed(speed: Float): String {
+    return String.format(Locale.US, "%.2fx", speed)
 }
 
 private fun formatDuration(ms: Long): String {

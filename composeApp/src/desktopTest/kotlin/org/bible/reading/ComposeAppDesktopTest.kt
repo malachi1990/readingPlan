@@ -6,6 +6,7 @@ import org.bible.reading.dto.ExportFormat
 import org.bible.reading.strategy.*
 import org.bible.reading.ui.PlanState
 import org.bible.reading.ui.PlanStrategyChoice
+import org.bible.reading.ui.ReadingPlanRepository
 import java.io.File
 import java.nio.file.Files
 import java.time.DayOfWeek
@@ -14,13 +15,17 @@ import kotlin.test.*
 
 class ComposeAppDesktopTest {
 
+    private fun tempPlanDir(): File = Files.createTempDirectory("plan_state_test").toFile().apply {
+        deleteOnExit()
+    }
+
     // =========================================================================
     // 1) UI & Configuration: Setting Books on Specific Days
     // =========================================================================
 
     @Test
     fun testSetBooksOnSpecificDaysViaState() {
-        val state = PlanState()
+        val state = PlanState(planStorageDir = tempPlanDir())
 
         // Clear all days initially to start fresh
         DayOfWeek.entries.forEach { dow -> state.clearDay(dow) }
@@ -55,7 +60,7 @@ class ComposeAppDesktopTest {
 
     @Test
     fun testAddEntireCollectionToSpecificDay() {
-        val state = PlanState()
+        val state = PlanState(planStorageDir = tempPlanDir())
         state.clearDay(DayOfWeek.TUESDAY)
 
         state.addCollectionToDay(DayOfWeek.TUESDAY, BookCollection.Gospels_Acts)
@@ -68,7 +73,7 @@ class ComposeAppDesktopTest {
 
     @Test
     fun testResetToCanonicalSchedule() {
-        val state = PlanState()
+        val state = PlanState(planStorageDir = tempPlanDir())
         state.clearDay(DayOfWeek.MONDAY)
         assertTrue(state.booksByDay[DayOfWeek.MONDAY]?.isEmpty() == true)
 
@@ -378,7 +383,7 @@ class ComposeAppDesktopTest {
 
     @Test
     fun testPlanStateEndToEndWorkflow() {
-        val state = PlanState()
+        val state = PlanState(planStorageDir = tempPlanDir())
 
         // 1. Configure Strategy
         state.selectedStrategyChoice = PlanStrategyChoice.DAY_OF_WEEK
@@ -448,7 +453,7 @@ class ComposeAppDesktopTest {
 
     @Test
     fun testSaveReadingPlanDefaultDirectoryResolution() {
-        val state = PlanState()
+        val state = PlanState(planStorageDir = tempPlanDir())
         // Default save directory is ~/downloads
         assertEquals("~/downloads", state.saveDirectory)
 
@@ -476,7 +481,7 @@ class ComposeAppDesktopTest {
         val tempDir = Files.createTempDirectory("plan_custom_dir").toFile()
         tempDir.deleteOnExit()
 
-        val state = PlanState()
+        val state = PlanState(planStorageDir = tempPlanDir())
         state.saveDirectory = tempDir.absolutePath
         state.saveFileName = "my_custom_plan"
         state.saveFormat = ExportFormat.MARKDOWN
@@ -493,5 +498,86 @@ class ComposeAppDesktopTest {
         assertTrue(savedFile.readText().contains("Philemon"))
 
         savedFile.delete()
+    }
+
+    // =========================================================================
+    // 5) App-Directory Auto-Persistence & Startup Loading
+    // =========================================================================
+
+    @Test
+    fun testGeneratePlanSavesToAppDirectoryAndAutoLoadsOnStartup() {
+        val appDir = tempPlanDir()
+        try {
+            // Initial startup with empty app directory: no reading plan loaded
+            val initialState = PlanState(planStorageDir = appDir)
+            assertNull(initialState.readingPlan)
+            assertFalse(initialState.planRepository.hasSavedPlan())
+
+            // Configure custom settings and generate plan
+            initialState.selectedStrategyChoice = PlanStrategyChoice.DAY_OF_WEEK
+            initialState.chaptersPerDay = 4
+            initialState.chaptersOnSunday = 7
+            initialState.useCustomPerDayChapters = true
+            initialState.setPerDayChapter(DayOfWeek.WEDNESDAY, 6)
+            initialState.continuationStrategyType = ContinuationStrategyType.SKIP
+            initialState.startDate = LocalDate.of(2026, 3, 15)
+            initialState.clearDay(DayOfWeek.MONDAY)
+            initialState.addBookToDay(DayOfWeek.MONDAY, Bible.JONAH)
+            initialState.clearDay(DayOfWeek.SATURDAY)
+
+            val generatedPlan = initialState.generatePlan()
+            assertTrue(generatedPlan.readings.isNotEmpty())
+            assertTrue(initialState.planRepository.hasSavedPlan())
+            assertEquals(
+                File(appDir, ReadingPlanRepository.SAVED_PLAN_FILE_NAME).absolutePath,
+                initialState.planRepository.planFile.absolutePath
+            )
+
+            // Simulate app restart / fresh startup pointing to the same app directory
+            val restartedState = PlanState(planStorageDir = appDir)
+            assertNotNull(restartedState.readingPlan, "Saved reading plan should be loaded automatically on startup")
+            assertEquals(generatedPlan, restartedState.readingPlan)
+            assertEquals(PlanStrategyChoice.DAY_OF_WEEK, restartedState.selectedStrategyChoice)
+            assertEquals(4, restartedState.chaptersPerDay)
+            assertEquals(7, restartedState.chaptersOnSunday)
+            assertTrue(restartedState.useCustomPerDayChapters)
+            assertEquals(6, restartedState.perDayChapters[DayOfWeek.WEDNESDAY])
+            assertEquals(ContinuationStrategyType.SKIP, restartedState.continuationStrategyType)
+            assertEquals(LocalDate.of(2026, 3, 15), restartedState.startDate)
+            assertEquals(listOf(Bible.JONAH), restartedState.booksByDay[DayOfWeek.MONDAY]?.toList())
+            assertTrue(restartedState.booksByDay[DayOfWeek.SATURDAY]?.isEmpty() == true)
+        } finally {
+            appDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun testRegeneratingPlanOverwritesSavedPlanAndCorruptFileFallsBackSafely() {
+        val appDir = tempPlanDir()
+        try {
+            val state1 = PlanState(planStorageDir = appDir)
+            state1.selectedStrategyChoice = PlanStrategyChoice.SIMPLE_SEQUENTIAL
+            state1.chaptersPerDay = 5
+            val firstPlan = state1.generatePlan()
+
+            // Regenerate with Weekday-only strategy
+            state1.selectedStrategyChoice = PlanStrategyChoice.WEEKDAY_ONLY
+            state1.chaptersPerDay = 6
+            val secondPlan = state1.generatePlan()
+            assertNotEquals(firstPlan.readings.size, secondPlan.readings.size)
+
+            // Startup loads the latest (second) plan
+            val state2 = PlanState(planStorageDir = appDir)
+            assertEquals(secondPlan, state2.readingPlan)
+            assertEquals(PlanStrategyChoice.WEEKDAY_ONLY, state2.selectedStrategyChoice)
+            assertEquals(6, state2.chaptersPerDay)
+
+            // Corrupt saved file should be ignored cleanly without crashing startup
+            state2.planRepository.planFile.writeText("corrupt-data-without-separator")
+            val stateAfterCorruption = PlanState(planStorageDir = appDir)
+            assertNull(stateAfterCorruption.readingPlan)
+        } finally {
+            appDir.deleteRecursively()
+        }
     }
 }

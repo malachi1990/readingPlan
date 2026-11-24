@@ -1,5 +1,6 @@
 package org.bible.reading.tts
 
+import javazoom.jl.decoder.Bitstream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -7,10 +8,19 @@ import kotlinx.coroutines.withContext
 import org.bible.reading.audio.model.AudioTrack
 import org.bible.reading.audio.player.AudioBiblePlayer
 import org.bible.reading.audio.player.AudioCodecRegistry
+import org.bible.reading.tts.ui.TtsFileUtils
 import org.bible.reading.ui.PlanState
+import java.io.BufferedInputStream
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.FileInputStream
 import java.nio.file.Files
+import javax.sound.sampled.AudioFileFormat
+import javax.sound.sampled.AudioFormat
+import javax.sound.sampled.AudioInputStream
 import javax.sound.sampled.AudioSystem
+import kotlin.math.PI
+import kotlin.math.sin
 import kotlin.test.*
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -61,6 +71,65 @@ class TextToSpeechIntegrationTest {
         assertTrue(formatted.contains("Chapter I - The City of Destruction"))
         assertTrue(formatted.contains("The Pilgrim's Progress"))
         assertTrue(formatted.contains("As I walked through the wilderness"))
+    }
+
+    @Test
+    fun testSplitIntoParagraphsAndFormatParagraphForSpeech() {
+        val content = "\n\n\tFirst indented paragraph.\nSecond line of first paragraph.\n\n   \nSecond paragraph [1] with — pause.\r\n\r\n   \r\n\t* List item A\n\t* List item B\n\n"
+        val paragraphs = TtsTextCleaner.splitIntoParagraphs(content)
+
+        assertEquals(3, paragraphs.size)
+        assertEquals("\tFirst indented paragraph.\nSecond line of first paragraph.", paragraphs[0])
+        assertEquals("Second paragraph [1] with — pause.", paragraphs[1])
+        assertEquals("\t* List item A\n\t* List item B", paragraphs[2])
+
+        val speech1 = TtsTextCleaner.formatParagraphForSpeech(paragraphs[1])
+        assertEquals("Second paragraph with , pause.", speech1)
+        assertTrue(TtsTextCleaner.splitIntoParagraphs("   \n\n  \t ").isEmpty())
+    }
+
+    @Test
+    fun testParagraphTrackTitleAndTtsServiceActions() = runBlocking {
+        val tempDir = withContext(Dispatchers.IO) {
+            Files.createTempDirectory("tts_paragraph_test")
+        }.toFile()
+        try {
+            val service = TtsService(tempDir)
+            val player = AudioBiblePlayer()
+
+            assertEquals(
+                "Chapter I • ¶1 • Pilgrim's Progress",
+                service.buildParagraphTrackTitle("Chapter I", "Pilgrim's Progress", 0)
+            )
+            assertEquals(
+                "Section • ¶3",
+                service.buildParagraphTrackTitle("", "", 2)
+            )
+
+            // Non-speakable paragraph updates status without synthesizing
+            service.readParagraph(
+                sectionTitle = "Chapter I",
+                subtitle = "Book",
+                paragraphIndex = 1,
+                paragraphText = "   ***   ",
+                player = player
+            )
+            assertEquals("No speakable text available in paragraph 2.", service.statusMessage)
+
+            // Queuing when idle triggers read/synthesis status
+            service.queueParagraph(
+                sectionTitle = "Chapter I",
+                subtitle = "Book",
+                paragraphIndex = 0,
+                paragraphText = "As I walked through the wilderness of this world.",
+                player = player
+            )
+            delay(100.milliseconds)
+            assertTrue(service.isSynthesizing || service.statusMessage != null || player.currentTrack != null)
+            service.stopReading(player)
+        } finally {
+            tempDir.deleteRecursively()
+        }
     }
 
     @Test
@@ -157,7 +226,7 @@ class TextToSpeechIntegrationTest {
 
     @Test
     fun testAudioTrackGeneralSupport() {
-        val tempFile = File.createTempFile("tts_track_test", ".wav").apply { deleteOnExit() }
+        val tempFile = File.createTempFile("tts_track_test", ".mp3").apply { deleteOnExit() }
         tempFile.writeBytes(ByteArray(100))
 
         val track = AudioTrack(
@@ -177,8 +246,8 @@ class TextToSpeechIntegrationTest {
     @Test
     fun testAudioBiblePlayerTitleTrackingAndQueue() {
         val player = AudioBiblePlayer()
-        val tempFile1 = File.createTempFile("test_player1", ".wav").apply { deleteOnExit() }
-        val tempFile2 = File.createTempFile("test_player2", ".wav").apply { deleteOnExit() }
+        val tempFile1 = File.createTempFile("test_player1", ".mp3").apply { deleteOnExit() }
+        val tempFile2 = File.createTempFile("test_player2", ".mp3").apply { deleteOnExit() }
         tempFile1.writeBytes(ByteArray(100))
         tempFile2.writeBytes(ByteArray(100))
 
@@ -215,24 +284,76 @@ class TextToSpeechIntegrationTest {
         }.toFile()
         try {
             val service = TtsService(tempDir)
-            val sourceWav = File(tempDir, "source.wav").apply {
-                writeText("RIFF....WAVEfmt ....data....")
+            val sourceMp3 = File(tempDir, "source.mp3").apply {
+                writeBytes(byteArrayOf(0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0x00))
             }
-            val destinationWav = File(tempDir, "saved/output_narration.wav")
+            val destinationMp3 = File(tempDir, "saved/output_narration.mp3")
 
-            val result = service.saveAudioToFile(sourceWav, destinationWav)
+            val result = service.saveAudioToFile(sourceMp3, destinationMp3)
             assertTrue(result.isSuccess)
-            assertTrue(destinationWav.exists())
-            assertEquals(sourceWav.length(), destinationWav.length())
+            assertTrue(destinationMp3.exists())
+            assertEquals(sourceMp3.length(), destinationMp3.length())
 
-            val track = AudioTrack(file = sourceWav, title = "Genesis 1:1")
-            val trackDest = File(tempDir, "saved/track_exported.wav")
+            val track = AudioTrack(file = sourceMp3, title = "Genesis 1:1")
+            val trackDest = File(tempDir, "saved/track_exported.mp3")
             val trackRes = service.saveTrackToFile(track, trackDest)
             assertTrue(trackRes.isSuccess)
             assertTrue(trackDest.exists())
         } finally {
             tempDir.deleteRecursively()
         }
+    }
+
+    @Test
+    fun testTtsMp3EncoderProduces128kbpsMp3ForPiperAndKokoroSampleRates() {
+        val tempDir = Files.createTempDirectory("tts_mp3_encode_test").toFile()
+        try {
+            val service = TtsService(tempDir)
+            listOf(22050f, 24000f).forEach { sampleRate ->
+                val wavFile = File(tempDir, "sine_${sampleRate.toInt()}.wav")
+                val mp3File = File(tempDir, "sine_${sampleRate.toInt()}.mp3")
+                writeSineWav(wavFile, sampleRate = sampleRate, durationSeconds = 1.0)
+
+                val encoded = TtsMp3Encoder.encodeWavToMp3(wavFile, mp3File, TtsMp3Encoder.DEFAULT_BITRATE_KBPS)
+                assertTrue(
+                    encoded.isSuccess,
+                    "Encoding WAV at ${sampleRate}Hz should succeed: ${encoded.exceptionOrNull()?.message}"
+                )
+                assertTrue(mp3File.exists() && mp3File.length() > 1024, "Encoded MP3 should be non-empty")
+
+                // Verify MPEG frame bitrate is 128000 bps (128 kbps)
+                val bitrateBps = readFirstMp3FrameBitrate(mp3File)
+                assertEquals(128_000, bitrateBps, "Encoded MP3 at ${sampleRate}Hz must be 128 kbps")
+
+                // Verify TtsService computes positive MP3 duration
+                val durationMs = service.computeDurationMs(mp3File)
+                assertTrue(durationMs in 800L..1300L, "Expected ~1000ms MP3 duration, got ${durationMs}ms")
+
+                // Verify AudioCodecRegistry selects MP3 codec and creates a valid session
+                val codec = AudioCodecRegistry.findCodec(mp3File)
+                assertNotNull(codec, "AudioCodecRegistry should handle synthesized MP3 file")
+                assertEquals("MP3", codec.name)
+                val session = codec.createSession(mp3File)
+                try {
+                    assertTrue(session.durationMs > 0L, "Decoded MP3 session should have positive duration")
+                } finally {
+                    session.release()
+                }
+            }
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun testTtsFileUtilsNormalizesToMp3() {
+        assertEquals("John_3.mp3", TtsFileUtils.normalizeSaveAudioFilename("John_3"))
+        assertEquals("John_3.mp3", TtsFileUtils.normalizeSaveAudioFilename("John_3.wav"))
+        assertEquals("John_3.mp3", TtsFileUtils.normalizeSaveAudioFilename("John_3.WAV"))
+        assertEquals("John_3.mp3", TtsFileUtils.normalizeSaveAudioFilename("John_3.mp3"))
+        assertEquals("John_3.MP3", TtsFileUtils.normalizeSaveAudioFilename("John_3.MP3"))
+        assertEquals("tts_audio.mp3", TtsFileUtils.normalizeSaveAudioFilename(""))
+        assertEquals("tts_audio.mp3", TtsFileUtils.normalizeSaveAudioFilename("   "))
     }
 
     @Test
@@ -324,16 +445,12 @@ class TextToSpeechIntegrationTest {
             assertTrue(result.isSuccess, "Synthesis should succeed: ${result.exceptionOrNull()?.message}")
             val audioFile = result.getOrThrow()
             assertTrue(audioFile.exists())
-            assertTrue(audioFile.length() > 1024, "Audio file should be non-empty WAV")
+            assertEquals("mp3", audioFile.extension.lowercase(), "Synthesized audio file should be .mp3")
+            assertTrue(audioFile.length() > 1024, "Audio file should be non-empty MP3")
 
-            // Verify WAV header
-            withContext(Dispatchers.IO) {
-                AudioSystem.getAudioInputStream(audioFile)
-            }.use { ais ->
-                val format = ais.format
-                assertEquals("PCM_SIGNED", format.encoding.toString())
-                assertTrue(ais.frameLength > 0, "WAV frame count should be positive")
-            }
+            // Verify 128kbps MP3 header and computed duration
+            assertEquals(128_000, readFirstMp3FrameBitrate(audioFile))
+            assertTrue(service.computeDurationMs(audioFile) > 0L, "MP3 duration should be positive")
 
             // 2. Second synthesis should be instantaneous cache hit
             val startMs = System.currentTimeMillis()
@@ -343,10 +460,10 @@ class TextToSpeechIntegrationTest {
             assertEquals(audioFile.absolutePath, cachedResult.getOrThrow().absolutePath)
             assertTrue(elapsed < 100, "Cached retrieval should take less than 100ms, took ${elapsed}ms")
 
-            // 3. AudioCodecRegistry can decode this audio file
+            // 3. AudioCodecRegistry can decode this MP3 audio file
             val codec = AudioCodecRegistry.findCodec(audioFile)
-            assertNotNull(codec, "AudioCodecRegistry should handle synthesized WAV file")
-            assertEquals("WAV", codec.name)
+            assertNotNull(codec, "AudioCodecRegistry should handle synthesized MP3 file")
+            assertEquals("MP3", codec.name)
         }
     }
 
@@ -366,8 +483,9 @@ class TextToSpeechIntegrationTest {
             val result = service.synthesizeAudio(cleanSpeech, trackTitle)
             assertTrue(result.isSuccess)
 
-            val wavFile = result.getOrThrow()
-            val track = AudioTrack(file = wavFile, title = trackTitle)
+            val mp3File = result.getOrThrow()
+            assertEquals("mp3", mp3File.extension.lowercase())
+            val track = AudioTrack(file = mp3File, title = trackTitle)
 
             player.playTrack(track)
             assertEquals(trackTitle, player.currentTrack?.title)
@@ -385,6 +503,38 @@ class TextToSpeechIntegrationTest {
             player.stop()
             assertFalse(player.isPlaying)
             assertNull(player.currentTrack, "currentTrack should be null when stopped to dismiss AudioPlayerBar")
+        }
+    }
+
+    private fun readFirstMp3FrameBitrate(mp3File: File): Int {
+        FileInputStream(mp3File).use { fis ->
+            BufferedInputStream(fis).use { bis ->
+                val bitstream = Bitstream(bis)
+                try {
+                    val header = bitstream.readFrame()
+                    assertNotNull(header, "Expected valid MPEG audio frame header in ${mp3File.name}")
+                    return header.bitrate()
+                } finally {
+                    bitstream.close()
+                }
+            }
+        }
+    }
+
+    private fun writeSineWav(outputFile: File, sampleRate: Float, durationSeconds: Double) {
+        val numFrames = (sampleRate * durationSeconds).toInt()
+        val pcmBytes = ByteArray(numFrames * 2)
+        val freqHz = 440.0
+        for (i in 0 until numFrames) {
+            val sample = (sin(2.0 * PI * freqHz * i / sampleRate) * 16000.0).toInt().toShort()
+            pcmBytes[i * 2] = (sample.toInt() and 0xFF).toByte()
+            pcmBytes[i * 2 + 1] = ((sample.toInt() shr 8) and 0xFF).toByte()
+        }
+        val format = AudioFormat(sampleRate, 16, 1, true, false)
+        ByteArrayInputStream(pcmBytes).use { bais ->
+            AudioInputStream(bais, format, numFrames.toLong()).use { ais ->
+                AudioSystem.write(ais, AudioFileFormat.Type.WAVE, outputFile)
+            }
         }
     }
 }

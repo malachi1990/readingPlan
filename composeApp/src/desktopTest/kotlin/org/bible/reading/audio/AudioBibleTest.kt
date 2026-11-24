@@ -7,8 +7,12 @@ import org.bible.reading.audio.player.AudioBiblePlayer
 import org.bible.reading.audio.player.AudioCodec
 import org.bible.reading.audio.player.AudioCodecRegistry
 import org.bible.reading.audio.player.AudioStreamSession
+import org.bible.reading.audio.player.MAX_PLAYBACK_SPEED
+import org.bible.reading.audio.player.MIN_PLAYBACK_SPEED
 import org.bible.reading.audio.player.Mp3AudioCodec
+import org.bible.reading.audio.player.PcmTimeStretcher
 import org.bible.reading.audio.player.WavAudioCodec
+import org.bible.reading.audio.player.normalizePlaybackSpeed
 import org.bible.reading.audio.preferences.AudioPreferences
 import org.bible.reading.audio.preferences.AudioPreferencesManager
 import org.bible.reading.audio.service.AudioBibleService
@@ -23,6 +27,7 @@ import org.bible.reading.dto.Bible
 import org.bible.reading.dto.DailyReading
 import org.bible.reading.dto.Reading
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
 import java.time.LocalDate
@@ -30,7 +35,12 @@ import javax.sound.sampled.AudioFileFormat
 import javax.sound.sampled.AudioFormat
 import javax.sound.sampled.AudioInputStream
 import javax.sound.sampled.AudioSystem
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -195,11 +205,13 @@ class AudioBibleTest {
         val manager = AudioPreferencesManager(tempDir)
         val initial = manager.loadPreferences()
         assertEquals("", initial.audioDirectory)
+        assertEquals(1.0f, initial.playbackSpeed)
 
         val updated = AudioPreferences(
             audioDirectory = "/home/user/AudioBible",
             selectedStrategyId = "numbered_book_chapter",
             volume = 0.75f,
+            playbackSpeed = 1.15f,
             autoPlayNext = true
         )
         manager.savePreferences(updated)
@@ -208,7 +220,169 @@ class AudioBibleTest {
         assertEquals("/home/user/AudioBible", reloaded.audioDirectory)
         assertEquals("numbered_book_chapter", reloaded.selectedStrategyId)
         assertEquals(0.75f, reloaded.volume)
+        assertEquals(1.15f, reloaded.playbackSpeed)
         assertTrue(reloaded.autoPlayNext)
+    }
+
+    @Test
+    fun testPlaybackSpeedNormalizationAndStepping() {
+        // Normalization & clamping
+        assertEquals(MIN_PLAYBACK_SPEED, normalizePlaybackSpeed(0.10f))
+        assertEquals(0.25f, normalizePlaybackSpeed(0.25f))
+        assertEquals(0.95f, normalizePlaybackSpeed(0.95f))
+        assertEquals(0.95f, normalizePlaybackSpeed(0.97f))
+        assertEquals(1.00f, normalizePlaybackSpeed(0.98f))
+        assertEquals(1.05f, normalizePlaybackSpeed(1.05f))
+        assertEquals(1.10f, normalizePlaybackSpeed(1.10f))
+        assertEquals(1.15f, normalizePlaybackSpeed(1.15f))
+        assertEquals(MAX_PLAYBACK_SPEED, normalizePlaybackSpeed(2.50f))
+        assertEquals(1.00f, normalizePlaybackSpeed(Float.NaN))
+
+        // Stepping across entire 0.25x .. 2.00x range in 5% increments
+        val player = AudioBiblePlayer(initialPlaybackSpeed = 0.25f)
+        assertEquals(0.25f, player.playbackSpeed)
+
+        val expectedSteps = (5..40).map { (it * 5) / 100f }
+        val recordedUp = mutableListOf(player.playbackSpeed)
+        repeat(40) {
+            player.increasePlaybackSpeed()
+            if (recordedUp.last() != player.playbackSpeed) {
+                recordedUp.add(player.playbackSpeed)
+            }
+        }
+        assertEquals(expectedSteps, recordedUp)
+        assertEquals(2.00f, player.playbackSpeed)
+
+        // Cannot go above 2.00x
+        player.increasePlaybackSpeed()
+        assertEquals(2.00f, player.playbackSpeed)
+
+        // Step down cleanly from 1.15 -> 1.10 -> 1.05 -> 1.00 -> 0.95
+        player.setPlaybackSpeed(1.15f)
+        assertEquals(1.15f, player.playbackSpeed)
+        player.decreasePlaybackSpeed()
+        assertEquals(1.10f, player.playbackSpeed)
+        player.decreasePlaybackSpeed()
+        assertEquals(1.05f, player.playbackSpeed)
+        player.decreasePlaybackSpeed()
+        assertEquals(1.00f, player.playbackSpeed)
+        player.decreasePlaybackSpeed()
+        assertEquals(0.95f, player.playbackSpeed)
+
+        // Reset returns to 1.00x
+        player.resetPlaybackSpeed()
+        assertEquals(1.00f, player.playbackSpeed)
+
+        // Clamp down to 0.25x
+        player.setPlaybackSpeed(0.25f)
+        player.decreasePlaybackSpeed()
+        assertEquals(0.25f, player.playbackSpeed)
+    }
+
+    @Test
+    fun testAudioBibleServicePersistsPlaybackSpeed() = runBlocking {
+        val tempAppDir = withContext(Dispatchers.IO) {
+            Files.createTempDirectory("audio_speed_pref_dir")
+        }.toFile()
+        tempAppDir.deleteOnExit()
+
+        val service = AudioBibleService(tempAppDir)
+        assertEquals(1.00f, service.player.playbackSpeed)
+
+        service.player.setPlaybackSpeed(1.35f)
+        assertEquals(1.35f, service.preferences.playbackSpeed)
+
+        // Recreate service to confirm persistence
+        val reloadedService = AudioBibleService(tempAppDir)
+        assertEquals(1.35f, reloadedService.preferences.playbackSpeed)
+        assertEquals(1.35f, reloadedService.player.playbackSpeed)
+    }
+
+    @Test
+    fun testPcmTimeStretcherSpeedScalingAndPitchPreservation() {
+        val sampleRate = 22050
+        val channels = 1
+        val durationSec = 2
+        val totalInputFrames = sampleRate * durationSec
+        val freqHz = 440.0
+
+        // Generate 2 seconds of 440Hz mono 16-bit PCM sine wave
+        val inputPcm = ByteArray(totalInputFrames * 2)
+        for (i in 0 until totalInputFrames) {
+            val sample = (12000.0 * sin(2.0 * PI * freqHz * i / sampleRate)).roundToInt()
+            inputPcm[i * 2] = (sample and 0xFF).toByte()
+            inputPcm[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
+        }
+
+        // 1.00x should be lossless passthrough
+        val passthroughStretcher = PcmTimeStretcher(sampleRate, channels)
+        val passthroughOut = passthroughStretcher.process(inputPcm, inputPcm.size, 1.00f)
+        assertContentEquals(inputPcm, passthroughOut)
+
+        // Test key speeds across full range: 0.25x, 0.50x, 0.95x, 1.05x, 1.15x, 2.00x
+        val testSpeeds = listOf(0.25f, 0.50f, 0.95f, 1.05f, 1.15f, 2.00f)
+        for (speed in testSpeeds) {
+            val stretcher = PcmTimeStretcher(sampleRate, channels)
+            val baos = ByteArrayOutputStream()
+            val chunkSize = 4096
+            var off = 0
+            while (off < inputPcm.size) {
+                val len = minOf(chunkSize, inputPcm.size - off)
+                val out = stretcher.process(inputPcm.copyOfRange(off, off + len), len, speed)
+                if (out.isNotEmpty()) baos.write(out)
+                off += len
+            }
+            val tail = stretcher.finish()
+            if (tail.isNotEmpty()) baos.write(tail)
+
+            val outBytes = baos.toByteArray()
+            val outFrames = outBytes.size / 2
+            val expectedFrames = (totalInputFrames / speed).toDouble()
+            val ratio = outFrames / expectedFrames
+            assertTrue(
+                ratio in 0.90..1.10,
+                "Speed $speed: expected ~$expectedFrames frames, got $outFrames (ratio=$ratio)"
+            )
+
+            // Verify pitch is preserved (~440Hz via zero-crossing rate in middle 1 second of output)
+            val midStart = (outFrames / 4).coerceAtLeast(0)
+            val midEnd = (midStart + sampleRate / 2).coerceAtMost(outFrames)
+            var zeroCrossings = 0
+            var prevSign = 0
+            for (f in midStart until midEnd) {
+                val lo = outBytes[f * 2].toInt() and 0xFF
+                val hi = outBytes[f * 2 + 1].toInt()
+                val s = ((hi shl 8) or lo).toShort().toInt()
+                val sign = if (s > 0) 1 else if (s < 0) -1 else 0
+                if (prevSign != 0 && sign != 0 && sign != prevSign) {
+                    zeroCrossings++
+                }
+                if (sign != 0) prevSign = sign
+            }
+            val measuredSec = (midEnd - midStart).toDouble() / sampleRate
+            val estimatedFreq = zeroCrossings / (2.0 * measuredSec)
+            assertTrue(
+                abs(estimatedFreq - freqHz) < 35.0,
+                "Speed $speed: pitch should stay near ${freqHz}Hz, measured ${estimatedFreq}Hz"
+            )
+        }
+
+        // Dynamic speed transitions (1.00 -> 1.25 -> 0.50 -> 1.00) must not crash or drop stream
+        val dynamicStretcher = PcmTimeStretcher(sampleRate, channels)
+        val dynamicOut = ByteArrayOutputStream()
+        val speeds = listOf(1.00f, 1.25f, 0.50f, 1.00f)
+        val segSize = inputPcm.size / speeds.size
+        for (idx in speeds.indices) {
+            val start = idx * segSize
+            val end = if (idx == speeds.lastIndex) inputPcm.size else (idx + 1) * segSize
+            val alignedEnd = end - ((end - start) % 2)
+            val chunk = inputPcm.copyOfRange(start, alignedEnd)
+            val out = dynamicStretcher.process(chunk, chunk.size, speeds[idx])
+            if (out.isNotEmpty()) dynamicOut.write(out)
+        }
+        val rem = dynamicStretcher.finish()
+        if (rem.isNotEmpty()) dynamicOut.write(rem)
+        assertTrue(dynamicOut.size() > inputPcm.size / 2)
     }
 
     @Test
@@ -314,6 +488,11 @@ class AudioBibleTest {
         val session = codec.createSession(wav)
         assertTrue(session.durationMs >= 1900L, "Expected duration around 2000ms but got ${session.durationMs}")
 
+        // Test setting speed on session directly
+        session.setPlaybackSpeed(1.15f)
+        session.setPlaybackSpeed(0.25f)
+        session.setPlaybackSpeed(2.00f)
+
         // Test seeking before play
         session.seekTo(1000L)
         assertEquals(1000L, session.currentPositionMs)
@@ -359,6 +538,12 @@ class AudioBibleTest {
         player.seekBackward(800L)
         assertEquals(1200L, player.currentPositionMs)
 
+        // Adjust speed during active track
+        player.setPlaybackSpeed(1.15f)
+        assertEquals(1.15f, player.playbackSpeed)
+        player.increasePlaybackSpeed()
+        assertEquals(1.20f, player.playbackSpeed)
+
         // Out of bounds seeking (negative clamped to 0)
         player.seekTo(-500L)
         assertEquals(0L, player.currentPositionMs)
@@ -384,6 +569,9 @@ class AudioBibleTest {
             val codec = Mp3AudioCodec()
             val session = codec.createSession(tempMp3)
             assertTrue(session.durationMs > 0, "Duration should be estimated for MP3")
+
+            session.setPlaybackSpeed(1.05f)
+            session.setPlaybackSpeed(2.00f)
 
             // Seek before play
             session.seekTo(1000L)

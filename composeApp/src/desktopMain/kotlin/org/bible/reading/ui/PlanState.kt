@@ -35,9 +35,12 @@ enum class PlanStrategyChoice(val displayName: String, val description: String) 
     CUSTOM_STRATEGY("Custom Pluggable Strategy", "Use a registered or user-defined custom strategy")
 }
 
-class PlanState {
+class PlanState(planStorageDir: File? = null) {
     // JSword Manager instance
     val swordManager = SwordManager()
+
+    // Repository for persisting/loading the active reading plan in the app directory
+    val planRepository = ReadingPlanRepository(planStorageDir ?: swordManager.appDir)
 
     // Navigation Tab
     var currentTab by mutableStateOf(MainAppTab.READING_PLAN)
@@ -110,6 +113,54 @@ class PlanState {
     var saveStatusMessage by mutableStateOf<String?>(null)
     var isSaveSuccess by mutableStateOf(true)
     var lastSavedFile by mutableStateOf<File?>(null)
+
+    init {
+        loadSavedPlanIfPresent()
+    }
+
+    /**
+     * Checks the app directory for a previously saved reading plan and loads it (along with its configuration).
+     * Returns true if a saved plan was found and loaded.
+     */
+    fun loadSavedPlanIfPresent(): Boolean {
+        val snapshot = planRepository.loadPlan() ?: return false
+        snapshot.selectedStrategyChoice?.let { selectedStrategyChoice = it }
+        snapshot.chaptersPerDay?.let { chaptersPerDay = it }
+        snapshot.chaptersOnSunday?.let { chaptersOnSunday = it }
+        snapshot.useCustomPerDayChapters?.let { useCustomPerDayChapters = it }
+        snapshot.perDayChapters.forEach { (day, ch) -> perDayChapters[day] = ch }
+        snapshot.booksByDay.forEach { (day, books) -> booksByDay[day] = books.toMutableList() }
+        snapshot.continuationStrategyType?.let { continuationStrategyType = it }
+        snapshot.customDayOrderMapping.forEach { (day, target) -> customDayOrderMapping[day] = target }
+        snapshot.customCollectionOrderMapping.forEach { (col, target) -> customCollectionOrderMapping[col] = target }
+        snapshot.startDate?.let { startDate = it }
+        selectedCustomStrategyName = snapshot.selectedCustomStrategyName
+        readingPlan = snapshot.plan
+        return true
+    }
+
+    /**
+     * Persists [plan] (or the current [readingPlan]) and current configuration into the app directory.
+     */
+    fun persistPlanToAppDirectory(plan: ReadingPlan? = readingPlan): File? {
+        val targetPlan = plan ?: return null
+        return planRepository.savePlan(
+            SavedPlanSnapshot(
+                plan = targetPlan,
+                selectedStrategyChoice = selectedStrategyChoice,
+                chaptersPerDay = chaptersPerDay,
+                chaptersOnSunday = chaptersOnSunday,
+                useCustomPerDayChapters = useCustomPerDayChapters,
+                perDayChapters = perDayChapters.toMap(),
+                booksByDay = booksByDay.mapValues { it.value.toList() },
+                continuationStrategyType = continuationStrategyType,
+                customDayOrderMapping = customDayOrderMapping.toMap(),
+                customCollectionOrderMapping = customCollectionOrderMapping.toMap(),
+                startDate = startDate,
+                selectedCustomStrategyName = selectedCustomStrategyName
+            )
+        )
+    }
 
     fun navigateDailyReading(offset: Int) {
         val plan = readingPlan ?: return
@@ -236,6 +287,7 @@ class PlanState {
         val strategy = buildCurrentStrategy()
         val plan = strategy.generateReadingPlan(startDate)
         readingPlan = plan
+        persistPlanToAppDirectory(plan)
         return plan
     }
 

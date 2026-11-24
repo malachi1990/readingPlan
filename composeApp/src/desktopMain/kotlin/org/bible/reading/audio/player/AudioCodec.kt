@@ -1,6 +1,21 @@
 package org.bible.reading.audio.player
 
 import java.io.File
+import kotlin.math.roundToInt
+
+const val MIN_PLAYBACK_SPEED = 0.25f
+const val MAX_PLAYBACK_SPEED = 2.00f
+const val PLAYBACK_SPEED_STEP = 0.05f
+
+/**
+ * Normalizes a playback speed value into [MIN_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED]
+ * snapped to exact 5% (0.05x) increments.
+ */
+fun normalizePlaybackSpeed(speed: Float): Float {
+    if (speed.isNaN()) return 1.0f
+    val stepIndex = (speed / PLAYBACK_SPEED_STEP).roundToInt().coerceIn(5, 40)
+    return (stepIndex * 5) / 100f
+}
 
 /**
  * An active decoding and playback session for an audio file.
@@ -18,6 +33,7 @@ interface AudioStreamSession {
     fun stop()
     fun seekTo(positionMs: Long)
     fun setVolume(volume: Float)
+    fun setPlaybackSpeed(speed: Float) {}
     fun release()
     fun setOnCompletionListener(listener: () -> Unit)
     fun setOnErrorListener(listener: (Throwable) -> Unit)
