@@ -144,6 +144,7 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
     private fun runPlaybackLoop() {
         var audioIn: AudioInputStream? = null
         var pcmIn: AudioInputStream? = null
+        var completedWithError = false
 
         try {
             val initialAudioIn = AudioSystem.getAudioInputStream(file)
@@ -218,7 +219,9 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
                     }
                 }
                 totalBytesRead = targetBytes - remainingToSkip
-                currentPositionAtomic.set((totalBytesRead / bytesPerMs).toLong())
+                if (pendingSeekMs.get() < 0) {
+                    currentPositionAtomic.set((totalBytesRead / bytesPerMs).toLong())
+                }
             }
 
             while (!isStopped.get()) {
@@ -247,12 +250,14 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
                 if (bytesRead == -1) break
 
                 val outPcm = stretcher.process(buffer, bytesRead, currentPlaybackSpeed)
-                if (outPcm.isNotEmpty() && !isStopped.get()) {
+                if (outPcm.isNotEmpty() && !isStopped.get() && pendingSeekMs.get() < 0) {
                     writeChunkedPcm(dataLine, outPcm, lineBufferSize, frameBytes)
                 }
                 totalBytesRead += bytesRead
-                val pendingBytes = stretcher.estimatedPendingInputFrames() * frameBytes
-                currentPositionAtomic.set(((totalBytesRead - pendingBytes).coerceAtLeast(0L) / bytesPerMs).toLong())
+                if (pendingSeekMs.get() < 0) {
+                    val pendingBytes = stretcher.estimatedPendingInputFrames() * frameBytes
+                    currentPositionAtomic.set(((totalBytesRead - pendingBytes).coerceAtLeast(0L) / bytesPerMs).toLong())
+                }
             }
 
             if (!isStopped.get()) {
@@ -266,8 +271,11 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
             }
 
         } catch (e: InterruptedException) {
-            // Cancelled
+            if (!isStopped.get()) {
+                completedWithError = true
+            }
         } catch (t: Throwable) {
+            completedWithError = true
             if (!isStopped.get()) {
                 onError?.invoke(t)
             }
@@ -283,7 +291,7 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
             } catch (_: Exception) {}
             line = null
 
-            val wasNormal = !isStopped.get()
+            val wasNormal = !isStopped.get() && !completedWithError
             isPlaying = false
             isPaused = false
 
@@ -301,7 +309,7 @@ private class WavStreamSession(override val file: File) : AudioStreamSession {
     ) {
         val step = (maxChunkSize - (maxChunkSize % frameBytes)).coerceAtLeast(frameBytes)
         var offset = 0
-        while (offset < pcmBytes.size && !isStopped.get()) {
+        while (offset < pcmBytes.size && !isStopped.get() && pendingSeekMs.get() < 0) {
             val len = minOf(step, pcmBytes.size - offset)
             val alignedLen = len - (len % frameBytes)
             if (alignedLen <= 0) break

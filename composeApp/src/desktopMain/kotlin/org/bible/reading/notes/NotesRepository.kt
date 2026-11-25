@@ -1,6 +1,11 @@
 package org.bible.reading.notes
 
 import androidx.compose.runtime.mutableStateListOf
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.LocalDateTime
 
@@ -22,7 +27,14 @@ import java.time.LocalDateTime
  */
 class NotesRepository(private val appDir: File) {
 
+    companion object {
+        private val SAFE_EXPORT_NAME_REGEX = Regex("[^A-Za-z0-9_\\- ]")
+        private val SANITIZE_MODULE_KEY_REGEX = Regex("[^A-Za-z0-9_\\-]")
+    }
+
     private val notesDir = File(appDir, "notes").apply { mkdirs() }
+    private val persistLock = Any()
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** All notes in memory, observable via Compose state. */
     val notes = mutableStateListOf<StudyNote>()
@@ -45,6 +57,12 @@ class NotesRepository(private val appDir: File) {
 
     /** Creates a new note for [moduleKey] with [defaultTitle] and saves it. */
     fun createNote(moduleKey: String, defaultTitle: String): StudyNote {
+        val note = createNoteInMemory(moduleKey, defaultTitle)
+        persist(note)
+        return note
+    }
+
+    fun createNoteInMemory(moduleKey: String, defaultTitle: String): StudyNote {
         val existing = notesFor(moduleKey)
         val note = StudyNote(
             moduleKey = moduleKey,
@@ -53,25 +71,67 @@ class NotesRepository(private val appDir: File) {
             isDefault = existing.isEmpty()   // first note for a module is auto-default
         )
         notes.add(note)
-        persist(note)
         return note
     }
 
-    /** Updates a note by id and saves it. Returns the updated note. */
-    fun updateNote(id: String, title: String, body: String): StudyNote? {
+    suspend fun createNoteAndPersistAsync(moduleKey: String, defaultTitle: String): StudyNote {
+        val note = createNoteInMemory(moduleKey, defaultTitle)
+        persistNoteAsync(note)
+        return note
+    }
+
+    /** Updates a note by id in memory without performing disk I/O. */
+    fun updateNoteInMemory(id: String, title: String, body: String): StudyNote? {
         val idx = notes.indexOfFirst { it.id == id }
         if (idx < 0) return null
         val updated = notes[idx].withTitle(title).withBody(body)
         notes[idx] = updated
+        return updated
+    }
+
+    /** Updates a note by id and saves it synchronously. Returns the updated note. */
+    fun updateNote(id: String, title: String, body: String): StudyNote? {
+        val updated = updateNoteInMemory(id, title, body) ?: return null
         persist(updated)
         return updated
+    }
+
+    /** Updates a note by id in memory and persists it on [Dispatchers.IO]. */
+    suspend fun updateNoteAsync(id: String, title: String, body: String): StudyNote? {
+        val updated = updateNoteInMemory(id, title, body) ?: return null
+        persistNoteAsync(updated)
+        return updated
+    }
+
+    suspend fun persistNoteAsync(note: StudyNote) = withContext(Dispatchers.IO) {
+        persist(note)
+    }
+
+    fun persistNoteInBackground(note: StudyNote) {
+        ioScope.launch {
+            persist(note)
+        }
     }
 
     /**
      * Marks [noteId] as default for its module and unmarks all siblings.
      */
     fun setDefault(noteId: String) {
-        val target = notes.firstOrNull { it.id == noteId } ?: return
+        val affected = setDefaultInMemory(noteId)
+        affected.forEach { persist(it) }
+    }
+
+    fun setDefaultAsync(noteId: String) {
+        val affected = setDefaultInMemory(noteId)
+        if (affected.isNotEmpty()) {
+            ioScope.launch {
+                affected.forEach { persist(it) }
+            }
+        }
+    }
+
+    private fun setDefaultInMemory(noteId: String): List<StudyNote> {
+        val target = notes.firstOrNull { it.id == noteId } ?: return emptyList()
         val updatedList = notes.map { n ->
             when {
                 n.id == noteId -> n.withDefault(true)
@@ -81,14 +141,16 @@ class NotesRepository(private val appDir: File) {
         }
         notes.clear()
         notes.addAll(updatedList)
-        updatedList.filter { it.moduleKey == target.moduleKey }.forEach { persist(it) }
+        return updatedList.filter { it.moduleKey == target.moduleKey }
     }
 
     /** Deletes a note by id. */
     fun deleteNote(id: String) {
         val note = notes.firstOrNull { it.id == id } ?: return
         notes.removeAll { it.id == id }
-        noteFile(note).delete()
+        synchronized(persistLock) {
+            noteFile(note).delete()
+        }
         // If deleted note was the default and there are siblings, make first sibling default
         val siblings = notesFor(note.moduleKey)
         if (note.isDefault && siblings.isNotEmpty()) {
@@ -96,11 +158,28 @@ class NotesRepository(private val appDir: File) {
         }
     }
 
+    fun deleteNoteAsync(id: String) {
+        val note = notes.firstOrNull { it.id == id } ?: return
+        notes.removeAll { it.id == id }
+        val siblings = notesFor(note.moduleKey)
+        val defaultAffected = if (note.isDefault && siblings.isNotEmpty()) {
+            setDefaultInMemory(siblings.first().id)
+        } else {
+            emptyList()
+        }
+        ioScope.launch {
+            synchronized(persistLock) {
+                noteFile(note).delete()
+            }
+            defaultAffected.forEach { persist(it) }
+        }
+    }
+
     /** Exports a note to a file. Returns the written [File]. */
     fun exportNote(note: StudyNote, directory: String, format: NoteExportFormat): File {
         val dir = resolveDir(directory)
         val ext = format.extension
-        val safeName = note.title.replace(Regex("[^A-Za-z0-9_\\- ]"), "_").trim()
+        val safeName = note.title.replace(SAFE_EXPORT_NAME_REGEX, "_").trim()
         val file = File(dir, "$safeName.$ext")
         file.writeText(
             when (format) {
@@ -111,6 +190,11 @@ class NotesRepository(private val appDir: File) {
         return file
     }
 
+    suspend fun exportNoteAsync(note: StudyNote, directory: String, format: NoteExportFormat): File =
+        withContext(Dispatchers.IO) {
+            exportNote(note, directory, format)
+        }
+
     // ── Persistence helpers ───────────────────────────────────────────────────
 
     private fun moduleDir(moduleKey: String): File =
@@ -120,19 +204,21 @@ class NotesRepository(private val appDir: File) {
         File(moduleDir(note.moduleKey), "${note.id}.note")
 
     private fun persist(note: StudyNote) {
-        val f = noteFile(note)
-        f.parentFile?.mkdirs()
-        val encodedTitle = note.title.replace("\n", "\\n").replace("|", "\\|")
-        f.writeText(buildString {
-            appendLine("id=${note.id}")
-            appendLine("moduleKey=${note.moduleKey}")
-            appendLine("title=$encodedTitle")
-            appendLine("isDefault=${note.isDefault}")
-            appendLine("createdAt=${note.createdAt}")
-            appendLine("updatedAt=${note.updatedAt}")
-            appendLine("---BODY---")
-            append(note.body)
-        })
+        synchronized(persistLock) {
+            val f = noteFile(note)
+            f.parentFile?.mkdirs()
+            val encodedTitle = note.title.replace("\n", "\\n").replace("|", "\\|")
+            f.writeText(buildString {
+                appendLine("id=${note.id}")
+                appendLine("moduleKey=${note.moduleKey}")
+                appendLine("title=$encodedTitle")
+                appendLine("isDefault=${note.isDefault}")
+                appendLine("createdAt=${note.createdAt}")
+                appendLine("updatedAt=${note.updatedAt}")
+                appendLine("---BODY---")
+                append(note.body)
+            })
+        }
     }
 
     private fun loadAll() {
@@ -176,7 +262,7 @@ class NotesRepository(private val appDir: File) {
         }
     }
 
-    private fun sanitize(s: String) = s.replace(Regex("[^A-Za-z0-9_\\-]"), "_")
+    private fun sanitize(s: String) = s.replace(SANITIZE_MODULE_KEY_REGEX, "_")
 
     private fun resolveDir(path: String): File {
         val expanded = if (path.startsWith("~")) {

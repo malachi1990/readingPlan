@@ -1,8 +1,10 @@
 package org.bible.reading.audio
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import org.bible.reading.audio.model.AudioTrack
 import org.bible.reading.audio.player.AudioBiblePlayer
 import org.bible.reading.audio.player.AudioCodec
 import org.bible.reading.audio.player.AudioCodecRegistry
@@ -26,6 +28,7 @@ import org.bible.reading.audio.strategy.StandardBookChapterStrategy
 import org.bible.reading.dto.Bible
 import org.bible.reading.dto.DailyReading
 import org.bible.reading.dto.Reading
+import org.bible.reading.tts.TtsMp3Encoder
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -35,6 +38,8 @@ import javax.sound.sampled.AudioFileFormat
 import javax.sound.sampled.AudioFormat
 import javax.sound.sampled.AudioInputStream
 import javax.sound.sampled.AudioSystem
+import javax.sound.sampled.DataLine
+import javax.sound.sampled.SourceDataLine
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -43,6 +48,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class AudioBibleTest {
@@ -513,7 +519,7 @@ class AudioBibleTest {
     fun testAudioBiblePlayerSeeking() = runBlocking {
         val wav = createSyntheticWav(durationSeconds = 3)
         val player = AudioBiblePlayer()
-        val track = org.bible.reading.audio.model.AudioTrack(
+        val track = AudioTrack(
             file = wav,
             title = "Synthetic Track",
             durationMs = 3000L
@@ -587,6 +593,89 @@ class AudioBibleTest {
             session.release()
         } catch (_: Exception) {
             // If ffmpeg process execution fails, skip
+        }
+    }
+
+    @Test
+    fun testMp3RewindDuringQueuedPlaybackDoesNotAdvanceToNextTrack() = runBlocking {
+        // Check if an audio output line is available in this test environment
+        val testFormat = AudioFormat(44100f, 16, 1, true, false)
+        val info = DataLine.Info(SourceDataLine::class.java, testFormat)
+        val lineAvailable = try {
+            if (!AudioSystem.isLineSupported(info)) {
+                false
+            } else {
+                val line = AudioSystem.getLine(info) as SourceDataLine
+                line.open(testFormat, 8192)
+                line.close()
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+        if (!lineAvailable) {
+            return@runBlocking
+        }
+
+        val wav1 = createSyntheticWav(durationSeconds = 4)
+        val wav2 = createSyntheticWav(durationSeconds = 4)
+        val mp31 = File.createTempFile("test_rewind_1_", ".mp3").apply { deleteOnExit() }
+        val mp32 = File.createTempFile("test_rewind_2_", ".mp3").apply { deleteOnExit() }
+
+        assertTrue(TtsMp3Encoder.encodeWavToMp3(wav1, mp31).isSuccess)
+        assertTrue(TtsMp3Encoder.encodeWavToMp3(wav2, mp32).isSuccess)
+
+        val player = AudioBiblePlayer(initialVolume = 0f, scope = this)
+        try {
+            val track1 = AudioTrack(file = mp31, title = "Track 1", durationMs = 4000L)
+            val track2 = AudioTrack(file = mp32, title = "Track 2", durationMs = 4000L)
+
+            player.playTracks(listOf(track1, track2))
+
+            // Wait until playback has decoded past several frames
+            var waited = 0
+            while (player.currentPositionMs < 250L && waited < 3000) {
+                delay(50)
+                waited += 50
+            }
+            assertTrue(player.isPlaying, "Track 1 should be playing")
+            assertEquals(0, player.currentTrackIndex)
+
+            // Rewind to beginning via seekBackward
+            player.seekBackward(10_000L)
+            delay(500)
+
+            assertNull(player.errorMessage, "Unexpected playback error after rewind: ${player.errorMessage}")
+            assertEquals(0, player.currentTrackIndex, "Rewinding should stay on Track 1, not skip to next track")
+            assertEquals("Track 1", player.currentTrack?.title)
+            assertTrue(player.isPlaying, "Track 1 should remain playing after rewind")
+
+            // Seek forward, then rewind partway back at 1.25x speed
+            player.setPlaybackSpeed(1.25f)
+            player.seekTo(1500L)
+            delay(300)
+            player.seekBackward(800L)
+            delay(400)
+
+            assertNull(player.errorMessage, "Unexpected playback error after partial rewind: ${player.errorMessage}")
+            assertEquals(0, player.currentTrackIndex, "Partial rewind should stay on Track 1")
+            assertEquals("Track 1", player.currentTrack?.title)
+            assertTrue(player.isPlaying, "Track 1 should remain playing after partial rewind")
+
+            // Rewind while paused and then resume
+            player.pause()
+            delay(150)
+            player.seekBackward(500L)
+            delay(200)
+            player.resume()
+            delay(300)
+
+            assertNull(player.errorMessage, "Unexpected playback error after paused rewind: ${player.errorMessage}")
+            assertEquals(0, player.currentTrackIndex, "Paused rewind should stay on Track 1")
+            assertEquals("Track 1", player.currentTrack?.title)
+            assertTrue(player.isPlaying, "Track 1 should remain playing after paused rewind")
+        } finally {
+            player.release()
         }
     }
 }

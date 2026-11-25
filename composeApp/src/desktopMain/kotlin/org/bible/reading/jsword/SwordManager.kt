@@ -32,6 +32,9 @@ import org.jdom2.Content
 import org.jdom2.Element
 import org.jdom2.Text
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.util.Properties
 
 data class VerseItem(
     val verseNumber: Int,
@@ -68,17 +71,54 @@ class SwordManager(
         }
     }
 ) {
+    companion object {
+        private const val MAX_CHAPTER_CACHE_ENTRIES = 32
+        private const val MAX_KEY_CONTENT_CACHE_ENTRIES = 16
+        const val BIBLE_PREFERENCES_FILE_NAME = "bible_preferences.properties"
+        private const val KEY_SELECTED_BIBLE_INITIALS = "selectedBibleInitials"
+
+        private val COLLAPSE_EXTRA_BLANK_LINES_REGEX = Regex("""\n(?:[ \t]*\n){2,}""")
+        private val LEADING_AFTER_LB_REGEX = Regex("""^(?:\r?\n)+[ \t]*""")
+        private val BLOCK_CONTAINER_CHILD_TAGS = setOf("p", "title", "q", "list", "table", "div")
+        private val EXTRA_BIBLICAL_ELEMENTS = setOf(
+            OSISUtil.OSIS_ELEMENT_NOTE,
+            OSISUtil.OSIS_ELEMENT_TITLE,
+            OSISUtil.OSIS_ELEMENT_REFERENCE,
+            "work"
+        )
+        private val WHITESPACE_SPLIT_REGEX = Regex("""\s+""")
+    }
 
     private val installManager = InstallManager()
     val importService by lazy { BookImportService(this) }
     private val moduleBooksCache = mutableMapOf<String, List<ModuleBook>>()
+    private val chapterCache = object : LinkedHashMap<String, ChapterPassage>(MAX_CHAPTER_CACHE_ENTRIES, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ChapterPassage>): Boolean {
+            return size > MAX_CHAPTER_CACHE_ENTRIES
+        }
+    }
+    private val keyContentCache = object : LinkedHashMap<String, String>(MAX_KEY_CONTENT_CACHE_ENTRIES, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>): Boolean {
+            return size > MAX_KEY_CONTENT_CACHE_ENTRIES
+        }
+    }
 
     // Observable list of installed books
     val installedBooks = mutableStateListOf<Book>()
     val installedBibles = mutableStateListOf<Book>()
 
+    private val biblePreferencesFile = File(appDir, BIBLE_PREFERENCES_FILE_NAME)
+    private var _selectedBible by mutableStateOf<Book?>(null)
+
     // Currently selected Bible for reading
-    var selectedBible by mutableStateOf<Book?>(null)
+    var selectedBible: Book?
+        get() = _selectedBible
+        set(value) {
+            _selectedBible = value
+            if (value != null && value.bookCategory == BookCategory.BIBLE) {
+                saveSelectedBibleInitials(value.initials)
+            }
+        }
 
     // Optional book requested to be opened in Further Study (e.g. from Import Queue)
     var pendingStudyModule by mutableStateOf<Book?>(null)
@@ -132,6 +172,12 @@ class SwordManager(
         synchronized(moduleBooksCache) {
             moduleBooksCache.clear()
         }
+        synchronized(chapterCache) {
+            chapterCache.clear()
+        }
+        synchronized(keyContentCache) {
+            keyContentCache.clear()
+        }
         installedBooks.clear()
         installedBibles.clear()
 
@@ -146,9 +192,48 @@ class SwordManager(
         val bibles = all.filter { it.bookCategory == BookCategory.BIBLE }
         installedBibles.addAll(bibles)
 
-        // If no Bible is selected or selected one was removed, select first available Bible
-        if (selectedBible == null || !bibles.contains(selectedBible)) {
-            selectedBible = bibles.firstOrNull() ?: all.firstOrNull()
+        // Restore the user's saved active Bible on startup or preserve current selection across refreshes
+        val preferredInitials = _selectedBible?.initials ?: loadSelectedBibleInitials()
+        val preferredBook = preferredInitials?.let { initials ->
+            bibles.firstOrNull { it.initials.equals(initials, ignoreCase = true) }
+        }
+
+        if (preferredBook != null) {
+            if (_selectedBible != preferredBook) {
+                _selectedBible = preferredBook
+            }
+        } else if (_selectedBible == null || !bibles.contains(_selectedBible)) {
+            val fallback = bibles.firstOrNull() ?: all.firstOrNull()
+            _selectedBible = fallback
+            // If a previously saved Bible was removed, update stored initials when another Bible is active
+            if (fallback != null && fallback.bookCategory == BookCategory.BIBLE && preferredInitials != null) {
+                saveSelectedBibleInitials(fallback.initials)
+            }
+        }
+    }
+
+    private fun loadSelectedBibleInitials(): String? {
+        if (!biblePreferencesFile.exists() || !biblePreferencesFile.isFile) return null
+        return try {
+            val props = Properties()
+            FileInputStream(biblePreferencesFile).use { props.load(it) }
+            props.getProperty(KEY_SELECTED_BIBLE_INITIALS)?.trim()?.takeIf { it.isNotEmpty() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun saveSelectedBibleInitials(initials: String) {
+        try {
+            if (!appDir.exists()) appDir.mkdirs()
+            val props = Properties().apply {
+                setProperty(KEY_SELECTED_BIBLE_INITIALS, initials)
+            }
+            FileOutputStream(biblePreferencesFile).use {
+                props.store(it, "Bible Reading Plan - Active Bible Preference")
+            }
+        } catch (e: Exception) {
+            println("Failed to write $BIBLE_PREFERENCES_FILE_NAME: ${e.message}")
         }
     }
 
@@ -402,6 +487,192 @@ class SwordManager(
         }
     }
 
+    private fun chapterCacheKey(book: Book, reading: Reading): String =
+        "ch|${book.initials}|${book.bookMetaData?.location ?: ""}|${reading.book}|${reading.chapterNumber}"
+
+    private fun passageCacheKey(book: Book, reference: String): String =
+        "ref|${book.initials}|${book.bookMetaData?.location ?: ""}|$reference"
+
+    private fun keyContentCacheKey(book: Book, key: Key): String =
+        "key|${book.initials}|${book.bookMetaData?.location ?: ""}|${key.osisRef.ifBlank { key.name }}"
+
+    fun getCachedChapter(reading: Reading, book: Book? = selectedBible): ChapterPassage? {
+        val targetBook = book ?: selectedBible ?: return null
+        val key = chapterCacheKey(targetBook, reading)
+        return synchronized(chapterCache) { chapterCache[key] }
+    }
+
+    fun areChaptersCached(readings: List<Reading>, book: Book? = selectedBible): Boolean {
+        val targetBook = book ?: selectedBible ?: return false
+        return synchronized(chapterCache) {
+            readings.all { chapterCache.containsKey(chapterCacheKey(targetBook, it)) }
+        }
+    }
+
+    fun getCachedKeyContent(book: Book?, key: Key?): String? {
+        if (book == null || key == null) return null
+        val cacheKey = keyContentCacheKey(book, key)
+        return synchronized(keyContentCache) { keyContentCache[cacheKey] }
+    }
+
+    private fun resolveBibleKey(targetBook: Book, bookName: String, chapterNumber: Int, wholeBookOnly: Boolean = false): Key {
+        val ref = if (wholeBookOnly) bookName else "$bookName $chapterNumber"
+        return try {
+            targetBook.getKey(ref)
+        } catch (e: NoSuchKeyException) {
+            when {
+                bookName.equals("Psalms", ignoreCase = true) ->
+                    targetBook.getKey(if (wholeBookOnly) "Psalm" else "Psalm $chapterNumber")
+                bookName.equals("Psalm", ignoreCase = true) ->
+                    targetBook.getKey(if (wholeBookOnly) "Psalms" else "Psalms $chapterNumber")
+                else -> throw e
+            }
+        }
+    }
+
+    private fun resolveReferenceKey(targetBook: Book, reference: String): Key {
+        return try {
+            targetBook.getKey(reference)
+        } catch (e: NoSuchKeyException) {
+            if (reference.startsWith("Psalms ", ignoreCase = true)) {
+                targetBook.getKey("Psalm " + reference.substring(7))
+            } else if (reference.startsWith("Psalm ", ignoreCase = true)) {
+                targetBook.getKey("Psalms " + reference.substring(6))
+            } else {
+                throw e
+            }
+        }
+    }
+
+    /**
+     * Parses [key] from [targetBook] once into a single OSIS DOM tree and extracts canonical text
+     * for every verse in [key], avoiding N per-verse JDOM parses per chapter.
+     * Falls back to per-verse `BookData(targetBook, k)` only if the chapter DOM does not expose
+     * `<verse>` elements (e.g. non-standard commentary modules).
+     */
+    private fun extractVersesSingleDom(targetBook: Book, key: Key): Pair<List<VerseItem>, Element> {
+        val chapterData = BookData(targetBook, key)
+        val chapterOsis = chapterData.osis
+
+        val verseTextsByOsisId = extractVerseTextsFromOsisDom(chapterOsis)
+        val verses = mutableListOf<VerseItem>()
+
+        if (verseTextsByOsisId.isNotEmpty()) {
+            for (k in key) {
+                val verseObj = k as? Verse
+                val osisId = verseObj?.osisID
+                val rawText = if (osisId != null) verseTextsByOsisId[osisId] else null
+                if (!rawText.isNullOrBlank()) {
+                    val cleanText = rawText.trim().removePrefix(k.name).trim()
+                    val verseNum = verseObj?.verse ?: 0
+                    if (cleanText.isNotBlank()) {
+                        verses.add(VerseItem(verseNumber = verseNum, text = cleanText, reference = k.name))
+                    }
+                }
+            }
+        }
+
+        // Graceful fallback for modules whose OSIS does not wrap/mark individual <verse> nodes
+        if (verses.isEmpty() && key.cardinality > 0) {
+            for (k in key) {
+                try {
+                    val vData = BookData(targetBook, k)
+                    val rawText = OSISUtil.getCanonicalText(vData.osis).trim()
+                    val cleanText = rawText.removePrefix(k.name).trim()
+                    val verseNum = if (k is Verse) k.verse else 0
+                    if (cleanText.isNotBlank()) {
+                        verses.add(VerseItem(verseNumber = verseNum, text = cleanText, reference = k.name))
+                    }
+                } catch (_: Exception) {
+                    // Ignore individual verse failures
+                }
+            }
+        }
+
+        return verses to chapterOsis
+    }
+
+    private fun extractVerseTextsFromOsisDom(root: Element): Map<String, String> {
+        val buffers = LinkedHashMap<String, StringBuilder>()
+        var activeMilestoneIds: List<String> = emptyList()
+        var activeMilestoneSid: String? = null
+
+        fun appendCanonicalSegment(target: StringBuilder, segment: String) {
+            if (segment.isEmpty()) return
+            if (target.isNotEmpty() && !target[target.length - 1].isWhitespace() && !segment[0].isWhitespace()) {
+                target.append(' ')
+            }
+            target.append(segment)
+        }
+
+        fun visit(content: Content) {
+            when (content) {
+                is Text -> {
+                    if (activeMilestoneIds.isEmpty()) return
+                    val txt = content.text
+                    if (txt.isEmpty()) return
+                    for (id in activeMilestoneIds) {
+                        val sb = buffers.getOrPut(id) { StringBuilder() }
+                        appendCanonicalSegment(sb, txt)
+                    }
+                }
+                is Element -> {
+                    val name = content.name
+                    if (name in EXTRA_BIBLICAL_ELEMENTS && !content.getAttributeValue(OSISUtil.OSIS_ATTR_CANONICAL).toBoolean()) {
+                        return
+                    }
+                    if (name == OSISUtil.OSIS_ELEMENT_VERSE) {
+                        val sId = content.getAttributeValue(OSISUtil.OSIS_ATTR_SID)
+                        val eId = content.getAttributeValue(OSISUtil.OSIS_ATTR_EID)
+                        val osisIdAttr = content.getAttributeValue(OSISUtil.OSIS_ATTR_OSISID)
+                        when {
+                            sId != null -> {
+                                activeMilestoneIds = osisIdAttr
+                                    ?.split(WHITESPACE_SPLIT_REGEX)
+                                    ?.filter { it.isNotBlank() }
+                                    ?: emptyList()
+                                activeMilestoneSid = sId
+                                if (content.contentSize > 0) {
+                                    for (child in content.content) {
+                                        visit(child)
+                                    }
+                                }
+                            }
+                            eId != null -> {
+                                if (activeMilestoneSid == null || activeMilestoneSid == eId) {
+                                    activeMilestoneIds = emptyList()
+                                    activeMilestoneSid = null
+                                }
+                            }
+                            else -> {
+                                val ids = osisIdAttr
+                                    ?.split(WHITESPACE_SPLIT_REGEX)
+                                    ?.filter { it.isNotBlank() }
+                                    ?: emptyList()
+                                if (ids.isNotEmpty()) {
+                                    val text = OSISUtil.getCanonicalText(content).trim()
+                                    if (text.isNotEmpty()) {
+                                        for (id in ids) {
+                                            val sb = buffers.getOrPut(id) { StringBuilder() }
+                                            appendCanonicalSegment(sb, text)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        return
+                    }
+
+                    for (child in content.content) {
+                        visit(child)
+                    }
+                }
+            }
+        }
+
+        visit(root)
+        return buffers.mapValues { (_, sb) -> sb.toString().trim() }
+    }
 
     fun readChapter(reading: Reading, book: Book? = selectedBible): ChapterPassage {
         val targetBook = book ?: selectedBible
@@ -415,85 +686,61 @@ class SwordManager(
             )
         }
 
+        val cacheKey = chapterCacheKey(targetBook, reading)
+        synchronized(chapterCache) {
+            chapterCache[cacheKey]?.let { return it }
+        }
+
         val refString = "${reading.book} ${reading.chapterNumber}"
         return try {
-            val key: Key = try {
-                targetBook.getKey(refString)
-            } catch (e: NoSuchKeyException) {
-                // Try alternative forms like Psalm vs Psalms
-                if (reading.book.equals("Psalms", ignoreCase = true)) {
-                    targetBook.getKey("Psalm ${reading.chapterNumber}")
-                } else if (reading.book.equals("Psalm", ignoreCase = true)) {
-                    targetBook.getKey("Psalms ${reading.chapterNumber}")
-                } else {
-                    throw e
-                }
-            }
+            var key = resolveBibleKey(targetBook, reading.book, reading.chapterNumber)
 
-            val verses = mutableListOf<VerseItem>()
-            for (k in key) {
+            // Single-chapter books (e.g. "Jude 1") may be parsed by JSword as a single verse (Jude 1:1);
+            // detect that upfront before parsing XML so we only parse the whole book once.
+            if (reading.chapterNumber == 1 && key.cardinality <= 1) {
                 try {
-                    val vData = BookData(targetBook, k)
-                    // Use getCanonicalText instead of getPlainText to exclude footnotes,
-                    // cross-references, and other extra-biblical <note>/<reference> elements
-                    // that may appear inline within a verse.
-                    val rawText = OSISUtil.getCanonicalText(vData.osis).trim()
-                    val cleanText = rawText.removePrefix(k.name).trim()
-                    val verseNum = if (k is Verse) k.verse else 0
-                    if (cleanText.isNotBlank()) {
-                        verses.add(VerseItem(verseNumber = verseNum, text = cleanText, reference = k.name))
+                    val wholeBookKey = resolveBibleKey(targetBook, reading.book, reading.chapterNumber, wholeBookOnly = true)
+                    if (wholeBookKey.cardinality > key.cardinality) {
+                        key = wholeBookKey
                     }
                 } catch (_: Exception) {
-                    // Ignore individual verse failures
+                    // Keep original key
                 }
             }
-            //this *should* only happen with single chapter books
-            if(verses.size ==1 ){
-                verses.clear()
-                val key: Key = try {
-                    targetBook.getKey(reading.book)
-                } catch (e: NoSuchKeyException) {
-                    // Try alternative forms like Psalm vs Psalms
-                    if (reading.book.equals("Psalms", ignoreCase = true)) {
-                        targetBook.getKey("Psalm ${reading.chapterNumber}")
-                    } else if (reading.book.equals("Psalm", ignoreCase = true)) {
-                        targetBook.getKey("Psalms ${reading.chapterNumber}")
-                    } else {
-                        throw e
-                    }
-                }
 
-                for (k in key) {
-                    try {
-                        val vData = BookData(targetBook, k)
-                        // Use getCanonicalText instead of getPlainText to exclude footnotes,
-                        // cross-references, and other extra-biblical <note>/<reference> elements
-                        // that may appear inline within a verse.
-                        val rawText = OSISUtil.getCanonicalText(vData.osis).trim()
-                        val cleanText = rawText.removePrefix(k.name).trim()
-                        val verseNum = if (k is Verse) k.verse else 0
-                        if (cleanText.isNotBlank()) {
-                            verses.add(VerseItem(verseNumber = verseNum, text = cleanText, reference = k.name))
-                        }
-                    } catch (_: Exception) {
-                        // Ignore individual verse failures
+            var (verses, chapterOsis) = extractVersesSingleDom(targetBook, key)
+
+            // Preserve legacy guard in case key.cardinality differed from extracted verses.size
+            if (verses.size == 1 && reading.chapterNumber == 1) {
+                try {
+                    val wholeBookKey = resolveBibleKey(targetBook, reading.book, reading.chapterNumber, wholeBookOnly = true)
+                    if (wholeBookKey.cardinality > 1) {
+                        key = wholeBookKey
+                        val reExtracted = extractVersesSingleDom(targetBook, key)
+                        verses = reExtracted.first
+                        chapterOsis = reExtracted.second
                     }
+                } catch (_: Exception) {
+                    // Keep initial extraction
                 }
             }
 
             val fullText = if (verses.isEmpty()) {
-                val data = BookData(targetBook, key)
-                OSISUtil.getCanonicalText(data.osis).trim()
+                OSISUtil.getCanonicalText(chapterOsis).trim()
             } else {
                 verses.joinToString("\n\n") { "${it.verseNumber} ${it.text}" }
             }
 
-            ChapterPassage(
+            val passage = ChapterPassage(
                 bookName = reading.book,
                 chapterNumber = reading.chapterNumber,
                 verses = verses,
                 fullText = fullText
             )
+            synchronized(chapterCache) {
+                chapterCache[cacheKey] = passage
+            }
+            passage
         } catch (e: Exception) {
             ChapterPassage(
                 bookName = reading.book,
@@ -527,48 +774,31 @@ class SwordManager(
             )
         }
 
-        return try {
-            val key: Key = try {
-                targetBook.getKey(reference)
-            } catch (e: NoSuchKeyException) {
-                if (reference.startsWith("Psalms ", ignoreCase = true)) {
-                    targetBook.getKey("Psalm " + reference.substring(7))
-                } else if (reference.startsWith("Psalm ", ignoreCase = true)) {
-                    targetBook.getKey("Psalms " + reference.substring(6))
-                } else {
-                    throw e
-                }
-            }
+        val cacheKey = passageCacheKey(targetBook, reference)
+        synchronized(chapterCache) {
+            chapterCache[cacheKey]?.let { return it }
+        }
 
-            val verses = mutableListOf<VerseItem>()
-            for (k in key) {
-                try {
-                    val vData = BookData(targetBook, k)
-                    // Use getCanonicalText instead of getPlainText to exclude footnotes,
-                    // cross-references, and other extra-biblical <note>/<reference> elements
-                    // that may appear inline within a verse.
-                    val rawText = OSISUtil.getCanonicalText(vData.osis).trim()
-                    val cleanText = rawText.removePrefix(k.name).trim()
-                    val verseNum = if (k is Verse) k.verse else 0
-                    if (cleanText.isNotBlank()) {
-                        verses.add(VerseItem(verseNumber = verseNum, text = cleanText, reference = k.name))
-                    }
-                } catch (_: Exception) {}
-            }
+        return try {
+            val key = resolveReferenceKey(targetBook, reference)
+            val (verses, passageOsis) = extractVersesSingleDom(targetBook, key)
 
             val fullText = if (verses.isEmpty()) {
-                val data = BookData(targetBook, key)
-                OSISUtil.getCanonicalText(data.osis).trim()
+                OSISUtil.getCanonicalText(passageOsis).trim()
             } else {
                 verses.joinToString("\n\n") { "${it.verseNumber} ${it.text}" }
             }
 
-            ChapterPassage(
+            val passage = ChapterPassage(
                 bookName = reference,
                 chapterNumber = 0,
                 verses = verses,
                 fullText = fullText
             )
+            synchronized(chapterCache) {
+                chapterCache[cacheKey] = passage
+            }
+            passage
         } catch (e: Exception) {
             ChapterPassage(
                 bookName = reference,
@@ -616,9 +846,17 @@ class SwordManager(
     }
 
     fun readKeyContent(book: Book, key: Key): String {
+        val cacheKey = keyContentCacheKey(book, key)
+        synchronized(keyContentCache) {
+            keyContentCache[cacheKey]?.let { return it }
+        }
         return try {
             val data = BookData(book, key)
-            extractFormattedKeyContent(data.osis).trim()
+            val content = extractFormattedKeyContent(data.osis).trim()
+            synchronized(keyContentCache) {
+                keyContentCache[cacheKey] = content
+            }
+            content
         } catch (e: Exception) {
             "Error loading content: ${e.message}"
         }
@@ -637,9 +875,7 @@ class SwordManager(
         return try {
             val sb = StringBuilder()
             extractFormattedNode(root, sb, parentIsContainer = true)
-            val formatted = sb.toString()
-                .replace(Regex("""\n(?:[ \t]*\n){2,}"""), "\n\n")
-                .trim()
+            val formatted = COLLAPSE_EXTRA_BLANK_LINES_REGEX.replace(sb.toString(), "\n\n").trim()
             if (formatted.isNotEmpty()) formatted else OSISUtil.getCanonicalText(root).trim()
         } catch (_: Exception) {
             OSISUtil.getCanonicalText(root).trim()
@@ -658,7 +894,7 @@ class SwordManager(
                 return false
             }
             if (afterLb) {
-                txt = txt.replace(Regex("""^(?:\r?\n)+[ \t]*"""), "")
+                txt = LEADING_AFTER_LB_REGEX.replace(txt, "")
                 if (txt.isEmpty()) return true
             }
             sb.append(txt)
@@ -686,7 +922,7 @@ class SwordManager(
             val isContainer = name == "osis" || name == "osistext" || name == "body" ||
                 name == "div" || name == "list" || name == "table" || name == "row" ||
                 (name == "q" && content.children.any {
-                    it.name.lowercase() in setOf("p", "title", "q", "list", "table", "div")
+                    it.name.lowercase() in BLOCK_CONTAINER_CHILD_TAGS
                 })
 
             if (isBlock) {

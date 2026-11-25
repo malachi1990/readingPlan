@@ -7,7 +7,6 @@ import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.zip.ZipInputStream
@@ -28,10 +27,15 @@ class PiperManager(private val appDir: File) {
 
     val isArm64 = osArch.contains("aarch64") || osArch.contains("arm64")
 
+    @Volatile
+    private var cachedPathResult: File? = null
+    @Volatile
+    private var cachedPathCheckedAtMs: Long = 0L
+
     /**
      * Resolves the executable binary for Piper:
      * 1. Check local app dir (~/.bibleReadingPlan/tts/piper/piper)
-     * 2. Check system PATH ('piper')
+     * 2. Check system PATH ('piper') with a short-lived cache to avoid repeated PATH scans.
      */
     fun findExecutable(): File? {
         val binaryName = if (isWindows) "piper.exe" else "piper"
@@ -47,16 +51,27 @@ class PiperManager(private val appDir: File) {
             return nestedBinary
         }
 
-        // 2. Check PATH
+        // 2. Check PATH (cached for 15s to keep repeated UI readiness checks cheap)
+        val now = System.currentTimeMillis()
+        if (now - cachedPathCheckedAtMs < 15_000L) {
+            val cached = cachedPathResult
+            if (cached == null || (cached.exists() && cached.canExecute())) {
+                return cached
+            }
+        }
+
+        var foundOnPath: File? = null
         val pathDirs = System.getenv("PATH")?.split(File.pathSeparator) ?: emptyList()
         for (dir in pathDirs) {
             val f = File(dir, binaryName)
             if (f.exists() && f.canExecute()) {
-                return f
+                foundOnPath = f
+                break
             }
         }
-
-        return null
+        cachedPathResult = foundOnPath
+        cachedPathCheckedAtMs = now
+        return foundOnPath
     }
 
     fun isBinaryInstalled(): Boolean = findExecutable() != null
@@ -93,6 +108,9 @@ class PiperManager(private val appDir: File) {
             } else {
                 extractTarGz(tempArchive, piperDir)
             }
+
+            // Invalidate cached PATH lookup after installing local binary
+            cachedPathCheckedAtMs = 0L
 
             // Set executable permission on binaries
             val binary = findExecutable()

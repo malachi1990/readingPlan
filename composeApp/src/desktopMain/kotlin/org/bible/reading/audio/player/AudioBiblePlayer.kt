@@ -152,14 +152,18 @@ class AudioBiblePlayer(
             session.setPlaybackSpeed(playbackSpeed)
             session.setOnCompletionListener {
                 scope.launch {
-                    handleTrackCompletion()
+                    if (activeSession === session) {
+                        handleTrackCompletion()
+                    }
                 }
             }
             session.setOnErrorListener { err ->
                 scope.launch {
-                    errorMessage = "Audio playback error: ${err.message}"
-                    isPlaying = false
-                    isPaused = false
+                    if (activeSession === session) {
+                        errorMessage = "Audio playback error: ${err.message}"
+                        isPlaying = false
+                        isPaused = false
+                    }
                 }
             }
 
@@ -200,11 +204,12 @@ class AudioBiblePlayer(
     fun stop() {
         progressJob?.cancel()
         progressJob = null
-        try {
-            activeSession?.stop()
-            activeSession?.release()
-        } catch (_: Exception) {}
+        val sessionToStop = activeSession
         activeSession = null
+        try {
+            sessionToStop?.stop()
+            sessionToStop?.release()
+        } catch (_: Exception) {}
         isPlaying = false
         isPaused = false
         currentPositionMs = 0L

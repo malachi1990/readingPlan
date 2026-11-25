@@ -12,8 +12,7 @@ enum class ContinuationStrategyType(val displayName: String, val description: St
     FIRST_AVAILABLE("First Available Day", "Continue from the earliest day in the week (Monday through Sunday)"),
     SKIP("Skip / Rest", "Do not continue readings on days whose assigned books are finished"),
     CUSTOM_DAY_ORDER("Custom: By Day Order", "When a day completes, select the configured next day (e.g. Sunday -> Wednesday)"),
-    CUSTOM_BOOK_COLLECTION("Custom: By Book Collection", "When a collection completes, select the configured next collection (e.g. Wisdom -> Gospels)"),
-    CUSTOM("Custom Strategy", "User-defined continuation strategy rule")
+    CUSTOM_BOOK_COLLECTION("Custom: By Book Collection", "When a collection completes, select the configured next collection (e.g. Wisdom -> Gospels)")
 }
 
 fun interface ContinuationStrategy {
@@ -135,7 +134,6 @@ fun interface ContinuationStrategy {
             ContinuationStrategyType.SKIP -> SKIP
             ContinuationStrategyType.CUSTOM_DAY_ORDER -> byDayOrder(defaultDayOrderMapping())
             ContinuationStrategyType.CUSTOM_BOOK_COLLECTION -> byBookCollection(DayOfWeekStrategy.defaultBooksByDay(), defaultCollectionOrderMapping())
-            ContinuationStrategyType.CUSTOM -> byDayOrder(defaultDayOrderMapping())
         }
 
         fun defaultDayOrderMapping(): Map<DayOfWeek, DayOfWeek> = mapOf(

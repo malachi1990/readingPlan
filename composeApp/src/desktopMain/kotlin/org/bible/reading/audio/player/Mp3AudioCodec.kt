@@ -158,9 +158,10 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
     private fun runPlaybackLoop() {
         var inputStream: BufferedInputStream? = null
         var bitstream: Bitstream? = null
-        val decoder = Decoder()
+        var decoder = Decoder()
         var currentFrame = 0L
         var msPerFrame = 26.12f // Standard default for 44.1kHz MP3
+        var completedWithError = false
 
         try {
             val initialStream = BufferedInputStream(FileInputStream(file))
@@ -206,17 +207,21 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
 
             fun emitStretched(pcmBytes: ByteArray) {
                 val stretched = stretcher.process(pcmBytes, pcmBytes.size, currentPlaybackSpeed)
-                if (stretched.isNotEmpty() && !isStopped.get()) {
+                if (stretched.isNotEmpty() && !isStopped.get() && pendingSeekMs.get() < 0) {
                     writeChunkedPcm(dataLine, stretched, lineBufferSize, frameBytes)
                 }
             }
 
-            // Write first frame
-            emitStretched(sampleBufferToPcmBytes(initialSampleBuffer))
+            // Write first frame (unless a pre-play seek is already queued)
+            if (pendingSeekMs.get() < 0) {
+                emitStretched(sampleBufferToPcmBytes(initialSampleBuffer))
+            }
             initialBitstream.closeFrame()
             currentFrame++
-            val initPendingMs = (stretcher.estimatedPendingInputFrames() * 1000L) / sampleRate
-            currentPositionAtomic.set(((currentFrame * msPerFrame).toLong() - initPendingMs).coerceAtLeast(0L))
+            if (pendingSeekMs.get() < 0) {
+                val initPendingMs = (stretcher.estimatedPendingInputFrames() * 1000L) / sampleRate
+                currentPositionAtomic.set(((currentFrame * msPerFrame).toLong() - initPendingMs).coerceAtLeast(0L))
+            }
 
             var activeBs = initialBitstream
 
@@ -238,12 +243,18 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
                     currentFrame = 0
                 }
 
+                // Reset Decoder so LayerIIIDecoder binds to the current Bitstream/Header
+                // and starts with a clean BitReserve after any seek.
+                decoder = Decoder()
+
                 while (currentFrame < targetFrame && !isStopped.get()) {
                     val skipHeader = activeBs.readFrame() ?: break
                     activeBs.closeFrame()
                     currentFrame++
                 }
-                currentPositionAtomic.set((currentFrame * msPerFrame).toLong())
+                if (pendingSeekMs.get() < 0) {
+                    currentPositionAtomic.set((currentFrame * msPerFrame).toLong())
+                }
             }
 
             // Main playback loop
@@ -278,8 +289,10 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
                 activeBs.closeFrame()
 
                 currentFrame++
-                val pendingMs = (stretcher.estimatedPendingInputFrames() * 1000L) / sampleRate
-                currentPositionAtomic.set(((currentFrame * msPerFrame).toLong() - pendingMs).coerceAtLeast(0L))
+                if (pendingSeekMs.get() < 0) {
+                    val pendingMs = (stretcher.estimatedPendingInputFrames() * 1000L) / sampleRate
+                    currentPositionAtomic.set(((currentFrame * msPerFrame).toLong() - pendingMs).coerceAtLeast(0L))
+                }
             }
 
             if (!isStopped.get()) {
@@ -293,8 +306,11 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
             }
 
         } catch (e: InterruptedException) {
-            // Normal thread cancellation
+            if (!isStopped.get()) {
+                completedWithError = true
+            }
         } catch (t: Throwable) {
+            completedWithError = true
             if (!isStopped.get()) {
                 onError?.invoke(t)
             }
@@ -310,7 +326,7 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
             } catch (_: Exception) {}
             line = null
 
-            val wasNormalCompletion = !isStopped.get()
+            val wasNormalCompletion = !isStopped.get() && !completedWithError
             isPlaying = false
             isPaused = false
 
@@ -341,7 +357,7 @@ private class Mp3StreamSession(override val file: File) : AudioStreamSession {
     ) {
         val step = (maxChunkSize - (maxChunkSize % frameBytes)).coerceAtLeast(frameBytes)
         var offset = 0
-        while (offset < pcmBytes.size && !isStopped.get()) {
+        while (offset < pcmBytes.size && !isStopped.get() && pendingSeekMs.get() < 0) {
             val len = minOf(step, pcmBytes.size - offset)
             val alignedLen = len - (len % frameBytes)
             if (alignedLen <= 0) break

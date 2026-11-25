@@ -1,5 +1,6 @@
 package org.bible.reading
 
+import androidx.compose.runtime.snapshots.Snapshot
 import org.bible.reading.dto.Bible
 import org.bible.reading.dto.BookCollection
 import org.bible.reading.dto.ExportFormat
@@ -56,6 +57,41 @@ class ComposeAppDesktopTest {
         state.removeBookFromDay(DayOfWeek.MONDAY, Bible.EXODUS)
         assertEquals(listOf(Bible.GENESIS), state.booksByDay[DayOfWeek.MONDAY]?.toList())
         assertEquals(50, state.getTotalChaptersForDay(DayOfWeek.MONDAY))
+    }
+
+    @Test
+    fun testBookDayMutationsTriggerComposeSnapshotNotification() {
+        val state = PlanState(planStorageDir = tempPlanDir())
+        var invalidationCount = 0
+
+        val handle = Snapshot.registerApplyObserver { changed, _ ->
+            if (state.booksByDay in changed) {
+                invalidationCount++
+            }
+        }
+        try {
+            Snapshot.withMutableSnapshot {
+                state.addBookToDay(DayOfWeek.MONDAY, Bible.RUTH)
+            }
+            assertTrue(invalidationCount > 0, "Adding a book should invalidate booksByDay snapshot")
+            assertTrue(state.booksByDay[DayOfWeek.MONDAY]?.contains(Bible.RUTH) == true)
+
+            val beforeRemoveCount = invalidationCount
+            Snapshot.withMutableSnapshot {
+                state.removeBookFromDay(DayOfWeek.MONDAY, Bible.RUTH)
+            }
+            assertTrue(invalidationCount > beforeRemoveCount, "Removing a book should invalidate booksByDay snapshot")
+            assertTrue(state.booksByDay[DayOfWeek.MONDAY]?.contains(Bible.RUTH) == false)
+
+            val beforeCollectionCount = invalidationCount
+            state.clearDay(DayOfWeek.TUESDAY)
+            Snapshot.withMutableSnapshot {
+                state.addCollectionToDay(DayOfWeek.TUESDAY, BookCollection.Gospels_Acts)
+            }
+            assertTrue(invalidationCount > beforeCollectionCount, "Adding a collection should invalidate booksByDay snapshot")
+        } finally {
+            handle.dispose()
+        }
     }
 
     @Test

@@ -388,6 +388,111 @@ class TextToSpeechIntegrationTest {
         assertFalse(state.showTtsSettingsDialog)
         state.showTtsSettingsDialog = true
         assertTrue(state.showTtsSettingsDialog)
+        state.showTtsSettingsDialog = false
+
+        state.openAudioTtsSettingsDialog(2)
+        assertTrue(state.showTtsSettingsDialog)
+        assertEquals(2, state.audioTtsSettingsInitialTab)
+
+        state.openAudioTtsSettingsDialog(99)
+        assertEquals(2, state.audioTtsSettingsInitialTab)
+        state.openAudioTtsSettingsDialog(-5)
+        assertEquals(0, state.audioTtsSettingsInitialTab)
+    }
+
+    @Test
+    fun testTtsBoundedLruCacheEvictsOldestEntries() {
+        val tempDir = Files.createTempDirectory("tts_lru_cache_test").toFile()
+        try {
+            val service = TtsService(tempDir, maxCacheBytes = 4_000L)
+            val f1 = File(service.cacheDir, "oldest.mp3").apply {
+                writeBytes(ByteArray(1_500))
+                setLastModified(1_000L)
+            }
+            val f2 = File(service.cacheDir, "middle.mp3").apply {
+                writeBytes(ByteArray(1_500))
+                setLastModified(2_000L)
+            }
+            val f3 = File(service.cacheDir, "newer.mp3").apply {
+                writeBytes(ByteArray(1_500))
+                setLastModified(3_000L)
+            }
+            val f4 = File(service.cacheDir, "newest.mp3").apply {
+                writeBytes(ByteArray(1_500))
+                setLastModified(4_000L)
+            }
+
+            service.enforceCacheLimit(excludeFile = f4)
+
+            assertFalse(f1.exists(), "Oldest entry should be evicted")
+            assertFalse(f2.exists(), "Second oldest entry should be evicted to meet 4000-byte cap")
+            assertTrue(f3.exists(), "More recent entry within budget should remain")
+            assertTrue(f4.exists(), "Excluded newest entry must remain")
+            assertTrue(service.getCacheSizeBytes() <= 4_000L, "Cache size should be bounded <= 4000 bytes")
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun testKokoroPersistentWorkerReusesProcessAndAutoStopsWhenIdle() = runBlocking {
+        if (System.getProperty("os.name").lowercase().contains("win")) return@runBlocking
+        val tempDir = withContext(Dispatchers.IO) {
+            Files.createTempDirectory("kokoro_worker_test").toFile()
+        }
+        val startCountFile = File(tempDir, "worker_starts.txt")
+        val mockPython = File(tempDir, "mock_python.sh").apply {
+            writeText(
+                """
+                #!/bin/sh
+                if [ "${'$'}1" = "-c" ]; then
+                    exit 0
+                fi
+                echo "start" >> "${startCountFile.absolutePath}"
+                echo '{"ready": true}'
+                while IFS= read -r line; do
+                    case "${'$'}line" in
+                        *'"cmd":"quit"'*)
+                            echo '{"ok": true}'
+                            exit 0
+                            ;;
+                        *)
+                            out_path=$(printf '%s\n' "${'$'}line" | sed -n 's/.*"out_path":"\([^"]*\)".*/\1/p')
+                            printf 'RIFFmockwav' > "${'$'}out_path"
+                            echo '{"ok": true, "provider_info": "Active providers: [CPUExecutionProvider]"}'
+                            ;;
+                    esac
+                done
+                """.trimIndent()
+            )
+            setExecutable(true)
+        }
+
+        val kokoroMgr = KokoroManager(tempDir, workerIdleTimeoutMs = 350L)
+        try {
+            val voice = TtsVoiceCatalog.KOKORO_VOICES.first()
+            val out1 = File(tempDir, "out1.wav")
+            val out2 = File(tempDir, "out2.wav")
+
+            val res1 = kokoroMgr.synthesize("First verse.", out1, voice, configuredPython = mockPython.absolutePath)
+            assertTrue(res1.isSuccess, "First synthesis failed: ${res1.exceptionOrNull()?.message}")
+            assertTrue(out1.exists() && out1.length() > 0)
+
+            val res2 = kokoroMgr.synthesize("Second verse.", out2, voice, configuredPython = mockPython.absolutePath)
+            assertTrue(res2.isSuccess, "Second synthesis failed: ${res2.exceptionOrNull()?.message}")
+            assertTrue(out2.exists() && out2.length() > 0)
+
+            // Persistent worker must be reused across both calls (only 1 process start)
+            assertEquals(1, startCountFile.readLines().size, "Worker should be started only once across requests")
+            assertTrue(kokoroMgr.isWorkerRunning, "Worker should still be alive right after synthesis")
+
+            // Wait past idle timeout and confirm worker stops automatically
+            delay(650.milliseconds)
+            assertFalse(kokoroMgr.isWorkerRunning, "Worker should shut down automatically after idle timeout")
+        } finally {
+            kokoroMgr.shutdownWorker()
+            tempDir.deleteRecursively()
+        }
     }
 
     @Test

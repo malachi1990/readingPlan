@@ -11,12 +11,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.bible.reading.dto.DailyReading
 import org.bible.reading.dto.Reading
 import org.bible.reading.jsword.ChapterPassage
 import org.bible.reading.jsword.SwordManager
 import org.bible.reading.audio.service.AudioBibleService
-import org.bible.reading.audio.ui.AudioPlayerBar
 import java.time.format.DateTimeFormatter
 
 @Composable
@@ -24,6 +25,7 @@ fun DailyReadingView(
     dailyReading: DailyReading,
     manager: SwordManager,
     audioService: AudioBibleService? = null,
+    sessionState: SessionReadingState? = null,
     onBack: () -> Unit,
     onOpenDownload: () -> Unit,
     onOpenAudioSettings: (() -> Unit)? = null,
@@ -31,7 +33,14 @@ fun DailyReadingView(
     onNextDay: (() -> Unit)? = null
 ) {
     val dateFormatter = DateTimeFormatter.ofPattern("EEEE, MMMM d, yyyy")
-    var selectedReadingIndex by remember(dailyReading) { mutableStateOf(-1) } // -1 means "All Chapters"
+    var selectedReadingIndex by remember(dailyReading) {
+        val savedIdx = sessionState?.getDailySelectedIndex(dailyReading.date) ?: -1
+        val normalizedIdx = if (savedIdx in dailyReading.reading.indices) savedIdx else -1
+        mutableStateOf(normalizedIdx)
+    } // -1 means "All Chapters"
+    LaunchedEffect(dailyReading, selectedReadingIndex) {
+        sessionState?.saveDailySelectedIndex(dailyReading.date, selectedReadingIndex)
+    }
     var bibleMenuExpanded by remember { mutableStateOf(false) }
 
     // Recompute passages whenever dailyReading, selectedBible, or selectedReadingIndex changes
@@ -43,9 +52,19 @@ fun DailyReadingView(
         }
     }
 
-    val passages: List<ChapterPassage> = remember(chaptersToDisplay, manager.selectedBible) {
-        chaptersToDisplay.map { reading ->
-            manager.readChapter(reading, manager.selectedBible)
+    val passagesState by produceState<List<ChapterPassage>?>(
+        initialValue = if (manager.areChaptersCached(chaptersToDisplay, manager.selectedBible)) {
+            chaptersToDisplay.map { reading -> manager.readChapter(reading, manager.selectedBible) }
+        } else {
+            null
+        },
+        key1 = chaptersToDisplay,
+        key2 = manager.selectedBible
+    ) {
+        value = withContext(Dispatchers.IO) {
+            chaptersToDisplay.map { reading ->
+                manager.readChapter(reading, manager.selectedBible)
+            }
         }
     }
 
@@ -151,7 +170,6 @@ fun DailyReadingView(
                                                 ) {
                                                     Text(bible.name, fontWeight = if (bible == manager.selectedBible) FontWeight.Bold else FontWeight.Normal)
                                                     Spacer(Modifier.width(10.dp))
-                                                    Text("(${bible.initials})", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                                                 }
                                             },
                                             onClick = {
@@ -232,7 +250,7 @@ fun DailyReadingView(
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                                 modifier = Modifier.height(34.dp)
                             ) {
-                                Text("🎧 Audio Settings", fontSize = 12.sp)
+                                Text("🎧 Setup Audio Bible", fontSize = 12.sp)
                             }
                         }
                     }
@@ -277,8 +295,29 @@ fun DailyReadingView(
                         }
                     }
                 }
+            } else if (passagesState == null) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator()
+                }
             } else {
+                val passages = passagesState!!
+                val sectionKey = sessionState?.dailySectionKey(dailyReading.date, selectedReadingIndex)
+                    ?: "daily|${dailyReading.date}|$selectedReadingIndex"
+                val listState = rememberTrackedLazyListState(
+                    sectionKey = sectionKey,
+                    initialPosition = {
+                        sessionState?.getDailyScrollPosition(dailyReading.date, selectedReadingIndex)
+                            ?: SessionScrollPosition()
+                    },
+                    onSavePosition = { index, offset ->
+                        sessionState?.saveDailyScrollPosition(dailyReading.date, selectedReadingIndex, index, offset)
+                    }
+                )
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(horizontal = 28.dp, vertical = 16.dp),
@@ -330,7 +369,7 @@ fun DailyReadingView(
                                                 color = MaterialTheme.colorScheme.primaryContainer
                                             ) {
                                                 Text(
-                                                    text = "${bible.name} (${bible.initials})",
+                                                    text = "${bible.name}",
                                                     style = MaterialTheme.typography.labelMedium,
                                                     color = MaterialTheme.colorScheme.onPrimaryContainer,
                                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)

@@ -26,8 +26,14 @@ import javax.sound.sampled.AudioSystem
 
 class TtsService(
     val appDir: File,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default)
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default),
+    val maxCacheBytes: Long = DEFAULT_MAX_CACHE_BYTES
 ) {
+    companion object {
+        const val DEFAULT_MAX_CACHE_BYTES = 300L * 1024L * 1024L
+        private const val STALE_TEMP_AGE_MS = 60L * 60L * 1000L
+    }
+
     private val preferencesManager = TtsPreferencesManager(appDir)
 
     var preferences by mutableStateOf(preferencesManager.loadPreferences())
@@ -38,6 +44,7 @@ class TtsService(
     val systemTtsEngine = SystemTtsEngine()
 
     val cacheDir = File(File(appDir, "tts"), "cache").apply { mkdirs() }
+    private val cacheLock = Any()
 
     // Observable states for UI feedback
     var isSynthesizing by mutableStateOf(false)
@@ -86,14 +93,17 @@ class TtsService(
 
     fun setKokoroPythonPath(path: String) {
         updatePreferences(preferences.copy(kokoroPythonPath = path.trim()))
+        kokoroManager.invalidateCache()
     }
 
     fun setKokoroBinaryPath(path: String) {
         updatePreferences(preferences.copy(kokoroBinaryPath = path.trim()))
+        kokoroManager.invalidateCache()
     }
 
     fun setKokoroVoicesPath(path: String) {
         updatePreferences(preferences.copy(kokoroVoicesPath = path.trim()))
+        kokoroManager.invalidateCache()
     }
 
     fun setKokoroUseCuda(useCuda: Boolean) {
@@ -114,6 +124,10 @@ class TtsService(
             )
             TtsEngineType.SYSTEM -> true
         }
+    }
+
+    suspend fun isVoiceReadyAsync(voice: TtsVoice): Boolean = withContext(Dispatchers.IO) {
+        isVoiceReady(voice)
     }
 
     /**
@@ -185,8 +199,11 @@ class TtsService(
         )
         val cachedFile = File(cacheDir, "$cacheKey.mp3")
 
-        if (cachedFile.exists() && cachedFile.length() > 256) {
-            return@withContext Result.success(cachedFile)
+        synchronized(cacheLock) {
+            if (cachedFile.exists() && cachedFile.length() > 256) {
+                cachedFile.setLastModified(System.currentTimeMillis())
+                return@withContext Result.success(cachedFile)
+            }
         }
 
         val tempWavFile = File(cacheDir, "$cacheKey.tmp.wav")
@@ -233,14 +250,18 @@ class TtsService(
                     bitrateKbps = TtsMp3Encoder.DEFAULT_BITRATE_KBPS
                 )
                 if (encodeResult.isSuccess && tempMp3File.exists()) {
-                    try {
-                        Files.move(
-                            tempMp3File.toPath(),
-                            cachedFile.toPath(),
-                            StandardCopyOption.REPLACE_EXISTING
-                        )
-                    } catch (_: Exception) {
-                        tempMp3File.renameTo(cachedFile)
+                    synchronized(cacheLock) {
+                        try {
+                            Files.move(
+                                tempMp3File.toPath(),
+                                cachedFile.toPath(),
+                                StandardCopyOption.REPLACE_EXISTING
+                            )
+                        } catch (_: Exception) {
+                            tempMp3File.renameTo(cachedFile)
+                        }
+                        cachedFile.setLastModified(System.currentTimeMillis())
+                        enforceCacheLimitLocked(excludeFile = cachedFile)
                     }
                     Result.success(cachedFile)
                 } else {
@@ -254,6 +275,55 @@ class TtsService(
             tempWavFile.delete()
             if (tempMp3File.exists()) {
                 tempMp3File.delete()
+            }
+        }
+    }
+
+    /**
+     * Enforces bounded LRU eviction on [cacheDir] so total cached `.mp3` audio never grows
+     * beyond [maxCacheBytes]. Protected by [cacheLock].
+     */
+    fun enforceCacheLimit(excludeFile: File? = null) {
+        synchronized(cacheLock) {
+            enforceCacheLimitLocked(excludeFile)
+        }
+    }
+
+    private fun enforceCacheLimitLocked(excludeFile: File? = null) {
+        val now = System.currentTimeMillis()
+        val files = cacheDir.listFiles() ?: return
+
+        val mp3Files = mutableListOf<File>()
+        var totalBytes = 0L
+
+        for (file in files) {
+            if (!file.isFile) continue
+            val name = file.name
+            if (name.contains(".tmp.")) {
+                if (now - file.lastModified() > STALE_TEMP_AGE_MS) {
+                    file.delete()
+                }
+                continue
+            }
+            if (file.extension.equals("mp3", ignoreCase = true)) {
+                mp3Files.add(file)
+                totalBytes += file.length()
+            }
+        }
+
+        if (totalBytes <= maxCacheBytes) return
+
+        val excludePath = excludeFile?.absolutePath
+        // Evict oldest-accessed entries first (LRU via lastModified timestamp), skipping the newly written file
+        val candidates = mp3Files
+            .filter { it.absolutePath != excludePath }
+            .sortedBy { it.lastModified() }
+
+        for (candidate in candidates) {
+            if (totalBytes <= maxCacheBytes) break
+            val size = candidate.length()
+            if (candidate.delete()) {
+                totalBytes -= size
             }
         }
     }
@@ -738,11 +808,23 @@ class TtsService(
     }
 
     fun clearCache() {
-        cacheDir.listFiles()?.forEach { it.delete() }
+        synchronized(cacheLock) {
+            cacheDir.listFiles()?.forEach { it.delete() }
+        }
+    }
+
+    suspend fun clearCacheAsync() = withContext(Dispatchers.IO) {
+        clearCache()
     }
 
     fun getCacheSizeBytes(): Long {
-        return cacheDir.listFiles()?.sumOf { it.length() } ?: 0L
+        synchronized(cacheLock) {
+            return cacheDir.listFiles()?.sumOf { it.length() } ?: 0L
+        }
+    }
+
+    suspend fun getCacheSizeBytesAsync(): Long = withContext(Dispatchers.IO) {
+        getCacheSizeBytes()
     }
 
     private fun hashText(input: String): String {

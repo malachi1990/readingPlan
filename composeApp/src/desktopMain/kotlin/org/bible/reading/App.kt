@@ -1,12 +1,15 @@
 package org.bible.reading
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.defaultScrollbarStyle
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -15,6 +18,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -27,15 +32,13 @@ import org.bible.reading.ui.DailyReadingView
 import org.bible.reading.ui.DownloadBibleDialog
 import org.bible.reading.ui.FurtherStudyView
 import org.bible.reading.audio.ui.AudioPlayerBar
-import org.bible.reading.audio.ui.AudioSettingsDialog
 import org.bible.reading.tts.ui.TtsSettingsDialog
-import org.bible.reading.importer.service.ImportItemStatus
-import org.bible.reading.ui.ImportQueueDialog
-import org.bible.reading.ui.openBooksFileChooser
-import java.io.File
+import org.bible.reading.ui.ImportQueueStatusChip
 import org.bible.reading.ui.MainAppTab
 import org.bible.reading.ui.PlanState
 import org.bible.reading.ui.PlanStrategyChoice
+import org.bible.reading.ui.rememberTrackedLazyListState
+import org.bible.reading.ui.rememberTrackedScrollState
 import java.awt.Desktop
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -86,7 +89,7 @@ fun App(state: PlanState = remember { PlanState() }) {
                                 onClick = { state.currentTab = MainAppTab.FURTHER_STUDY },
                                 text = {
                                     Text(
-                                        text = "further study",
+                                        text = "Further Study",
                                         fontWeight = if (state.currentTab == MainAppTab.FURTHER_STUDY) FontWeight.Bold else FontWeight.Medium,
                                         fontSize = 15.sp
                                     )
@@ -94,7 +97,7 @@ fun App(state: PlanState = remember { PlanState() }) {
                             )
                         }
 
-                        // Right side controls: Active Bible indicator & Download Modules button
+                        // Right side controls: Active Bible indicator & Add Books button
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -105,7 +108,7 @@ fun App(state: PlanState = remember { PlanState() }) {
                                     color = MaterialTheme.colorScheme.secondaryContainer,
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(16.dp))
-                                        .clickable { state.showDownloadDialog = true }
+                                        .clickable { state.openAddBooksDialog(1) }
                                 ) {
                                     Text(
                                         text = "📖 ${activeBible.initials}",
@@ -118,77 +121,19 @@ fun App(state: PlanState = remember { PlanState() }) {
                             }
 
                             OutlinedButton(
-                                onClick = { state.showTtsSettingsDialog = true }
+                                onClick = { state.openAudioTtsSettingsDialog(0) }
                             ) {
-                                Text("🔊 Voice Settings", fontWeight = FontWeight.SemiBold)
+                                Text("🔊 Audio & Voice Settings", fontWeight = FontWeight.SemiBold)
+                            }
+
+                            if (state.currentTab != MainAppTab.FURTHER_STUDY) {
+                                ImportQueueStatusChip(state.swordManager.importService)
                             }
 
                             OutlinedButton(
-                                onClick = {
-                                    openBooksFileChooser { files ->
-                                        state.swordManager.enqueueBookImports(files)
-                                        state.swordManager.importService.isQueueDialogOpen = true
-                                    }
-                                }
+                                onClick = { state.openAddBooksDialog(0) }
                             ) {
-                                Text("📥 Import Book", fontWeight = FontWeight.SemiBold)
-                            }
-
-                            val importService = state.swordManager.importService
-                            val importQueueItems = importService.queueItems
-                            if (importQueueItems.isNotEmpty()) {
-                                val isImporting = importService.isProcessing
-                                val successCount = importQueueItems.count { it.status is ImportItemStatus.Success }
-                                val failedCount = importQueueItems.count { it.status is ImportItemStatus.Failed }
-                                val doneCount = successCount + failedCount
-                                val chipContainerColor = when {
-                                    isImporting -> MaterialTheme.colorScheme.tertiaryContainer
-                                    failedCount > 0 -> MaterialTheme.colorScheme.errorContainer
-                                    else -> MaterialTheme.colorScheme.primaryContainer
-                                }
-                                val chipContentColor = when {
-                                    isImporting -> MaterialTheme.colorScheme.onTertiaryContainer
-                                    failedCount > 0 -> MaterialTheme.colorScheme.onErrorContainer
-                                    else -> MaterialTheme.colorScheme.onPrimaryContainer
-                                }
-                                Surface(
-                                    shape = RoundedCornerShape(16.dp),
-                                    color = chipContainerColor,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(16.dp))
-                                        .clickable { importService.isQueueDialogOpen = true }
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        if (isImporting) {
-                                            CircularProgressIndicator(
-                                                modifier = Modifier.size(12.dp),
-                                                strokeWidth = 2.dp,
-                                                color = chipContentColor
-                                            )
-                                        }
-                                        val label = when {
-                                            isImporting -> "Importing ${doneCount + 1}/${importQueueItems.size}"
-                                            failedCount > 0 -> "⚠️ $successCount/${importQueueItems.size} imported"
-                                            else -> "✅ $successCount imported"
-                                        }
-                                        Text(
-                                            text = label,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = chipContentColor
-                                        )
-                                    }
-                                }
-                            }
-
-                            OutlinedButton(
-                                onClick = { state.showDownloadDialog = true }
-                            ) {
-                                Text("📚 Download Modules", fontWeight = FontWeight.SemiBold)
+                                Text("📚 Manage Books", fontWeight = FontWeight.SemiBold)
                             }
                         }
                     }
@@ -204,9 +149,10 @@ fun App(state: PlanState = remember { PlanState() }) {
                                     dailyReading = activeReading,
                                     manager = state.swordManager,
                                     audioService = state.audioService,
+                                    sessionState = state.sessionReadingState,
                                     onBack = { state.viewingDailyReading = null },
-                                    onOpenDownload = { state.showDownloadDialog = true },
-                                    onOpenAudioSettings = { state.showAudioSettingsDialog = true },
+                                    onOpenDownload = { state.openAddBooksDialog(0) },
+                                    onOpenAudioSettings = { state.openAudioTtsSettingsDialog(2) },
                                     onPreviousDay = if (state.hasPreviousDailyReading()) { { state.navigateDailyReading(-1) } } else null,
                                     onNextDay = if (state.hasNextDailyReading()) { { state.navigateDailyReading(1) } } else null
                                 )
@@ -219,8 +165,9 @@ fun App(state: PlanState = remember { PlanState() }) {
                                 manager = state.swordManager,
                                 ttsService = state.ttsService,
                                 audioPlayer = state.audioService.player,
-                                onOpenDownload = { state.showDownloadDialog = true },
-                                onOpenTtsSettings = { state.showTtsSettingsDialog = true }
+                                sessionState = state.sessionReadingState,
+                                onOpenDownload = { state.openAddBooksDialog(0) },
+                                onOpenTtsSettings = { state.openAudioTtsSettingsDialog(0) }
                             )
                         }
                     }
@@ -238,37 +185,34 @@ fun App(state: PlanState = remember { PlanState() }) {
                 }
             }
 
-            // Download dialog view
-            if (state.showDownloadDialog) {
+            // Unified Add Books dialog (Install from Remote / Installed Books / Import from Local)
+            val isLocalQueueRequested = state.swordManager.importService.isQueueDialogOpen
+            if (state.showDownloadDialog || isLocalQueueRequested) {
                 DownloadBibleDialog(
                     manager = state.swordManager,
-                    onDismissRequest = { state.showDownloadDialog = false }
-                )
-            }
-
-            if (state.swordManager.importService.isQueueDialogOpen) {
-                ImportQueueDialog(
-                    manager = state.swordManager,
-                    onDismiss = { state.swordManager.importService.isQueueDialogOpen = false },
-                    onImportSuccess = { book ->
+                    initialTab = if (isLocalQueueRequested) 2 else state.addBooksInitialTab,
+                    onDismissRequest = {
+                        state.showDownloadDialog = false
+                        state.swordManager.importService.isQueueDialogOpen = false
+                    },
+                    onOpenStudy = { book ->
                         state.swordManager.pendingStudyModule = book
                         state.currentTab = MainAppTab.FURTHER_STUDY
                     }
                 )
             }
 
-            if (state.showAudioSettingsDialog) {
-                AudioSettingsDialog(
-                    audioService = state.audioService,
-                    onDismiss = { state.showAudioSettingsDialog = false }
-                )
-            }
-
-            if (state.showTtsSettingsDialog) {
+            // Unified Audio & TTS Settings modal
+            if (state.showTtsSettingsDialog || state.showAudioSettingsDialog) {
                 TtsSettingsDialog(
                     ttsService = state.ttsService,
                     player = state.audioService.player,
-                    onDismiss = { state.showTtsSettingsDialog = false }
+                    audioService = state.audioService,
+                    initialTab = if (state.showAudioSettingsDialog) 2 else state.audioTtsSettingsInitialTab,
+                    onDismiss = {
+                        state.showTtsSettingsDialog = false
+                        state.showAudioSettingsDialog = false
+                    }
                 )
             }
         }
@@ -306,9 +250,9 @@ private fun BibleReadingPlanView(state: PlanState) {
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(
-                        onClick = { state.showAudioSettingsDialog = true }
+                        onClick = { state.openAudioTtsSettingsDialog(2) }
                     ) {
-                        Text("🎧 Audio Bible", fontWeight = FontWeight.SemiBold)
+                        Text("🎧 Setup Audio Bible", fontWeight = FontWeight.SemiBold)
                     }
 
                     Button(
@@ -335,13 +279,19 @@ private fun BibleReadingPlanView(state: PlanState) {
                     .fillMaxHeight(),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
+                val configScrollState = rememberTrackedScrollState(
+                    sectionKey = "reading_plan_config",
+                    initialValue = { state.sessionReadingState.readingPlanConfigScrollValue },
+                    onSaveValue = { v -> state.sessionReadingState.readingPlanConfigScrollValue = v }
+                )
+                Box(modifier = Modifier.fillMaxSize()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(configScrollState)
+                            .padding(start = 16.dp, top = 16.dp, bottom = 16.dp, end = 24.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
                     // Section 1: Strategy Selection
                     StrategySelectionSection(state)
 
@@ -351,8 +301,7 @@ private fun BibleReadingPlanView(state: PlanState) {
                     ChaptersPerDaySection(state)
 
                     // Section 3: Day-of-Week Specific Book & Continuation Settings
-                    if (state.selectedStrategyChoice == PlanStrategyChoice.DAY_OF_WEEK ||
-                        state.selectedStrategyChoice == PlanStrategyChoice.CUSTOM_STRATEGY
+                    if (state.selectedStrategyChoice == PlanStrategyChoice.DAY_OF_WEEK
                     ) {
                         HorizontalDivider()
                         ContinuationStrategySection(state)
@@ -365,6 +314,20 @@ private fun BibleReadingPlanView(state: PlanState) {
 
                     // Section 4: Start Date
                     StartDateSection(state)
+                    }
+
+                    VerticalScrollbar(
+                        adapter = rememberScrollbarAdapter(scrollState = configScrollState),
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .fillMaxHeight()
+                            .padding(vertical = 8.dp, horizontal = 4.dp),
+                        style = defaultScrollbarStyle().copy(
+                            thickness = 10.dp,
+                            unhoverColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.40f),
+                            hoverColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)
+                        )
+                    )
                 }
             }
 
@@ -400,9 +363,6 @@ private fun StrategySelectionSection(state: PlanState) {
                     .clip(RoundedCornerShape(8.dp))
                     .clickable {
                         state.selectedStrategyChoice = choice
-                        if (choice == PlanStrategyChoice.CUSTOM_STRATEGY && customStrategies.isNotEmpty() && state.selectedCustomStrategyName == null) {
-                            state.selectedCustomStrategyName = customStrategies.keys.first()
-                        }
                     }
                     .padding(vertical = 4.dp, horizontal = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -411,9 +371,6 @@ private fun StrategySelectionSection(state: PlanState) {
                     selected = state.selectedStrategyChoice == choice,
                     onClick = {
                         state.selectedStrategyChoice = choice
-                        if (choice == PlanStrategyChoice.CUSTOM_STRATEGY && customStrategies.isNotEmpty() && state.selectedCustomStrategyName == null) {
-                            state.selectedCustomStrategyName = customStrategies.keys.first()
-                        }
                     }
                 )
                 Spacer(Modifier.width(8.dp))
@@ -433,51 +390,51 @@ private fun StrategySelectionSection(state: PlanState) {
         }
 
         // If custom strategy is selected, let user pick from registered custom strategies
-        if (state.selectedStrategyChoice == PlanStrategyChoice.CUSTOM_STRATEGY) {
-            if (customStrategies.isNotEmpty()) {
-                var menuExpanded by remember { mutableStateOf(false) }
-                OutlinedCard(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { menuExpanded = true }
-                            .padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Selected Custom Strategy: ${state.selectedCustomStrategyName ?: "None"}",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        Text("Change", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
-
-                        DropdownMenu(
-                            expanded = menuExpanded,
-                            onDismissRequest = { menuExpanded = false }
-                        ) {
-                            customStrategies.keys.forEach { name ->
-                                DropdownMenuItem(
-                                    text = { Text(name) },
-                                    onClick = {
-                                        state.selectedCustomStrategyName = name
-                                        menuExpanded = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-            } else {
-                Text(
-                    text = "No additional custom strategies registered in StrategyRegistry. Using configured Day-of-Week settings.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 12.dp)
-                )
-            }
-        }
+//        if (state.selectedStrategyChoice == PlanStrategyChoice.CUSTOM_STRATEGY) {
+//            if (customStrategies.isNotEmpty()) {
+//                var menuExpanded by remember { mutableStateOf(false) }
+//                OutlinedCard(
+//                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+//                ) {
+//                    Row(
+//                        modifier = Modifier
+//                            .fillMaxWidth()
+//                            .clickable { menuExpanded = true }
+//                            .padding(12.dp),
+//                        horizontalArrangement = Arrangement.SpaceBetween,
+//                        verticalAlignment = Alignment.CenterVertically
+//                    ) {
+//                        Text(
+//                            text = "Selected Custom Strategy: ${state.selectedCustomStrategyName ?: "None"}",
+//                            style = MaterialTheme.typography.bodyMedium
+//                        )
+//                        Text("Change", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
+//
+//                        DropdownMenu(
+//                            expanded = menuExpanded,
+//                            onDismissRequest = { menuExpanded = false }
+//                        ) {
+//                            customStrategies.keys.forEach { name ->
+//                                DropdownMenuItem(
+//                                    text = { Text(name) },
+//                                    onClick = {
+//                                        state.selectedCustomStrategyName = name
+//                                        menuExpanded = false
+//                                    }
+//                                )
+//                            }
+//                        }
+//                    }
+//                }
+//            } else {
+//                Text(
+//                    text = "No additional custom strategies registered in StrategyRegistry. Using configured Day-of-Week settings.",
+//                    style = MaterialTheme.typography.bodySmall,
+//                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+//                    modifier = Modifier.padding(start = 12.dp)
+//                )
+//            }
+//        }
     }
 }
 
@@ -489,7 +446,11 @@ private fun ChaptersPerDaySection(state: PlanState) {
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold
         )
-
+        Text(
+            text = "How many chapters are assigned per day. By default, each day is given 3 chapters, except Sunday which has 5 chapters. This makes reading the Bible in a year a breeze!",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -661,8 +622,7 @@ private fun ContinuationStrategySection(state: PlanState) {
         }
 
         // Custom Completion Option 1: By Day Order
-        if (state.continuationStrategyType == ContinuationStrategyType.CUSTOM_DAY_ORDER ||
-            state.continuationStrategyType == ContinuationStrategyType.CUSTOM
+        if (state.continuationStrategyType == ContinuationStrategyType.CUSTOM_DAY_ORDER
         ) {
             Card(
                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
@@ -978,35 +938,51 @@ private fun BooksByDaySection(state: PlanState) {
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 assignedBooks.forEach { book ->
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.secondaryContainer,
-                        modifier = Modifier.padding(2.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp)
+                    key(book) {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            modifier = Modifier.padding(2.dp)
                         ) {
-                            Text(
-                                text = "${book.bookName} (${book.chapters})",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Box(
-                                modifier = Modifier
-                                    .size(16.dp)
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.15f))
-                                    .clickable { state.removeBookFromDay(activeDow, book) },
-                                contentAlignment = Alignment.Center
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp)
                             ) {
                                 Text(
-                                    "×",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
+                                    text = "${book.bookName} (${book.chapters})",
+                                    style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer
                                 )
+                                Spacer(Modifier.width(6.dp))
+                                val iconColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                Box(
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .clip(CircleShape)
+                                        .background(iconColor.copy(alpha = 0.15f))
+                                        .clickable(onClickLabel = "Remove ${book.bookName}") {
+                                            state.removeBookFromDay(activeDow, book)
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Canvas(modifier = Modifier.size(8.dp)) {
+                                        val strokeWidth = 1.6.dp.toPx()
+                                        drawLine(
+                                            color = iconColor,
+                                            start = Offset(0f, 0f),
+                                            end = Offset(size.width, size.height),
+                                            strokeWidth = strokeWidth,
+                                            cap = StrokeCap.Round
+                                        )
+                                        drawLine(
+                                            color = iconColor,
+                                            start = Offset(size.width, 0f),
+                                            end = Offset(0f, size.height),
+                                            strokeWidth = strokeWidth,
+                                            cap = StrokeCap.Round
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -1123,12 +1099,21 @@ private fun PlanResultsSection(state: PlanState) {
             }
         }
 
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
+        val resultsListState = rememberTrackedLazyListState(
+            sectionKey = "reading_plan_results",
+            initialPosition = { state.sessionReadingState.readingPlanResultsScrollPosition },
+            onSavePosition = { idx, off ->
+                state.sessionReadingState.readingPlanResultsScrollPosition =
+                    org.bible.reading.ui.SessionScrollPosition(idx, off)
+            }
+        )
+        Box(modifier = Modifier.fillMaxSize()) {
+            LazyColumn(
+                state = resultsListState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 16.dp, top = 16.dp, bottom = 16.dp, end = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
             // ── Header ────────────────────────────────────────────────────────
             item {
                 Row(
@@ -1274,6 +1259,20 @@ private fun PlanResultsSection(state: PlanState) {
                     }
                 }
             }
+            }
+
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(scrollState = resultsListState),
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                style = defaultScrollbarStyle().copy(
+                    thickness = 10.dp,
+                    unhoverColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.40f),
+                    hoverColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)
+                )
+            )
         }
     }
 }

@@ -3,12 +3,12 @@ package org.bible.reading.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -17,13 +17,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key as ComposeKey
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.bible.reading.dto.Reading
 import org.bible.reading.jsword.ChapterPassage
 import org.bible.reading.jsword.ModuleBook
 import org.bible.reading.jsword.SwordManager
@@ -40,8 +47,10 @@ import org.crosswire.jsword.book.sword.SwordBookMetaData
 import org.crosswire.jsword.passage.Key
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
-import java.io.File
 import kotlin.time.Duration.Companion.milliseconds
+
+private val SAFE_EXPORT_FILENAME_REGEX = Regex("[^a-zA-Z0-9.-]")
+private val QUICK_REF_REGEX = Regex("""^([1-3]?\s*[A-Za-z]+(?:\s+[A-Za-z]+)?)\s*(\d+)?(?::(\d+))?""")
 
 enum class ModuleCategoryTab(val displayName: String, val category: BookCategory?) {
     ALL("All Modules", null),
@@ -58,25 +67,45 @@ fun FurtherStudyView(
     manager: SwordManager,
     ttsService: TtsService,
     audioPlayer: AudioBiblePlayer,
+    sessionState: SessionReadingState? = null,
     onOpenDownload: () -> Unit,
     onOpenTtsSettings: () -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
 
     // Category filter for module selector
-    var categoryTab by remember { mutableStateOf(ModuleCategoryTab.ALL) }
+    var categoryTab by remember {
+        mutableStateOf(
+            sessionState?.furtherStudyCategoryTabName?.let { name ->
+                ModuleCategoryTab.entries.firstOrNull { it.name == name }
+            } ?: ModuleCategoryTab.ALL
+        )
+    }
+    LaunchedEffect(categoryTab) {
+        sessionState?.furtherStudyCategoryTabName = categoryTab.name
+    }
 
     // Selected primary module
     var selectedModule by remember(manager.installedBooks) {
         mutableStateOf<Book?>(
-            manager.selectedBible ?: manager.installedBooks.firstOrNull()
+            manager.pendingStudyModule
+                ?: sessionState?.furtherStudySelectedModuleInitials?.let { init ->
+                    manager.installedBooks.firstOrNull { it.initials.equals(init, ignoreCase = true) }
+                }
+                ?: manager.selectedBible
+                ?: manager.installedBooks.firstOrNull()
         )
+    }
+    LaunchedEffect(selectedModule) {
+        selectedModule?.let { sessionState?.furtherStudySelectedModuleInitials = it.initials }
     }
 
     // Keep selectedModule valid if installedBooks changes
     LaunchedEffect(manager.installedBooks) {
         if (selectedModule == null || !manager.installedBooks.contains(selectedModule)) {
-            selectedModule = manager.selectedBible ?: manager.installedBooks.firstOrNull()
+            selectedModule = sessionState?.furtherStudySelectedModuleInitials?.let { init ->
+                manager.installedBooks.firstOrNull { it.initials.equals(init, ignoreCase = true) }
+            } ?: manager.selectedBible ?: manager.installedBooks.firstOrNull()
         }
     }
 
@@ -84,6 +113,7 @@ fun FurtherStudyView(
     LaunchedEffect(manager.pendingStudyModule) {
         val target = manager.pendingStudyModule ?: return@LaunchedEffect
         selectedModule = target
+        sessionState?.furtherStudySelectedModuleInitials = target.initials
         if (target.bookCategory == BookCategory.GENERAL_BOOK) {
             categoryTab = ModuleCategoryTab.GENERAL_BOOKS
         }
@@ -97,16 +127,28 @@ fun FurtherStudyView(
     val notesRepository = remember { NotesRepository(manager.appDir) }
 
     // Parallel comparison mode state
-    var isParallelMode by remember { mutableStateOf(false) }
+    var isParallelMode by remember { mutableStateOf(sessionState?.furtherStudyIsParallelMode ?: false) }
+    LaunchedEffect(isParallelMode) {
+        sessionState?.furtherStudyIsParallelMode = isParallelMode
+    }
     var secondaryModule by remember(manager.installedBooks) {
         mutableStateOf<Book?>(
-            manager.installedBooks.firstOrNull { it.bookCategory == BookCategory.COMMENTARY }
+            sessionState?.furtherStudySecondaryModuleInitials?.let { init ->
+                manager.installedBooks.firstOrNull { it.initials.equals(init, ignoreCase = true) }
+            }
+                ?: manager.installedBooks.firstOrNull { it.bookCategory == BookCategory.COMMENTARY }
                 ?: manager.installedBooks.firstOrNull { it != selectedModule }
         )
     }
+    LaunchedEffect(secondaryModule) {
+        sessionState?.furtherStudySecondaryModuleInitials = secondaryModule?.initials
+    }
 
     // Notes panel toggle
-    var isNotesMode by remember { mutableStateOf(false) }
+    var isNotesMode by remember { mutableStateOf(sessionState?.furtherStudyIsNotesMode ?: false) }
+    LaunchedEffect(isNotesMode) {
+        sessionState?.furtherStudyIsNotesMode = isNotesMode
+    }
 
     // Check if the current module is verse-based (commentaries/devotionals only if backed by a passage driver)
     val isVerseBasedModule = selectedModule?.bookCategory == BookCategory.BIBLE ||
@@ -121,25 +163,38 @@ fun FurtherStudyView(
     var isLoadingModuleBooks by remember(selectedModule) {
         mutableStateOf(selectedModule != null && isVerseBasedModule)
     }
+    // Verse-based navigation state: index into moduleBooks + chapter number.
+    var currentBookIndex by remember(selectedModule) { mutableStateOf(0) }
+    var currentChapter by remember(selectedModule) { mutableStateOf(1) }
+    var selectedVerseFilter by remember(selectedModule) { mutableStateOf(0) } // 0 means all verses
+
     LaunchedEffect(selectedModule) {
         val mod = selectedModule
         if (mod != null && isVerseBasedModule) {
             isLoadingModuleBooks = true
-            moduleBooks = withContext(Dispatchers.IO) {
+            val loadedBooks = withContext(Dispatchers.IO) {
                 manager.getModuleBooks(mod)
             }
+            val savedPos = sessionState?.getModulePosition(mod.initials)
+            val restoredBookIdx = savedPos?.bookOsis?.let { osis ->
+                loadedBooks.indexOfFirst { it.bibleBook.osis == osis }.takeIf { it >= 0 }
+            } ?: 0
+            val mb = loadedBooks.getOrNull(restoredBookIdx)
+            val restoredChapter = if (mb != null && savedPos != null && savedPos.chapter in mb.chapters) {
+                savedPos.chapter
+            } else {
+                mb?.chapters?.firstOrNull() ?: 1
+            }
+            currentBookIndex = restoredBookIdx
+            currentChapter = restoredChapter
+            selectedVerseFilter = savedPos?.selectedVerseFilter ?: 0
+            moduleBooks = loadedBooks
             isLoadingModuleBooks = false
         } else {
             isLoadingModuleBooks = false
             moduleBooks = emptyList()
         }
     }
-
-    // Verse-based navigation state: index into moduleBooks + chapter number.
-    // Reset to the first book/chapter whenever the module changes.
-    var currentBookIndex by remember(selectedModule) { mutableStateOf(0) }
-    var currentChapter by remember(selectedModule) { mutableStateOf(1) }
-    var selectedVerseFilter by remember { mutableStateOf(0) } // 0 means all verses
 
     val currentModuleBook: ModuleBook? = moduleBooks.getOrNull(currentBookIndex)
 
@@ -151,6 +206,20 @@ fun FurtherStudyView(
         }
     }
 
+    // Persist current verse-based position in session once module TOC is loaded
+    LaunchedEffect(selectedModule, currentModuleBook, currentChapter, selectedVerseFilter, isLoadingModuleBooks) {
+        val mod = selectedModule ?: return@LaunchedEffect
+        val mb = currentModuleBook ?: return@LaunchedEffect
+        if (!isLoadingModuleBooks && isVerseBasedModule) {
+            sessionState?.saveVersePosition(
+                moduleInitials = mod.initials,
+                bookOsis = mb.bibleBook.osis,
+                chapter = currentChapter,
+                verseFilter = selectedVerseFilter
+            )
+        }
+    }
+
     // Quick reference jump
     var quickRefInput by remember { mutableStateOf("") }
     var quickRefError by remember { mutableStateOf<String?>(null) }
@@ -159,22 +228,59 @@ fun FurtherStudyView(
     var genBookKeys by remember(selectedModule) {
         mutableStateOf<List<Key>>(emptyList())
     }
+    var isLoadingGenBookKeys by remember(selectedModule) {
+        mutableStateOf(selectedModule != null && !isVerseBasedModule)
+    }
     var selectedKeyIndex by remember(selectedModule) { mutableStateOf(0) }
-    var genBookSearchQuery by remember { mutableStateOf("") }
+    var genBookSearchQuery by remember { mutableStateOf(sessionState?.furtherStudyGenBookSearchQuery ?: "") }
+    LaunchedEffect(genBookSearchQuery) {
+        sessionState?.furtherStudyGenBookSearchQuery = genBookSearchQuery
+    }
 
     // Fetch keys when a non-verse-based module (General Book, Dictionary, Devotional, etc.) is selected
     LaunchedEffect(selectedModule) {
         val mod = selectedModule
         if (mod != null && !isVerseBasedModule) {
-            genBookKeys = manager.getBookKeys(mod)
-            selectedKeyIndex = 0
+            isLoadingGenBookKeys = true
+            val loadedKeys = withContext(Dispatchers.IO) { manager.getBookKeys(mod) }
+            val savedPos = sessionState?.getModulePosition(mod.initials)
+            val restoredIdx = when {
+                savedPos == null -> 0
+                savedPos.selectedKeyName != null -> {
+                    loadedKeys.indexOfFirst { it.name == savedPos.selectedKeyName }
+                        .takeIf { it >= 0 }
+                        ?: savedPos.selectedKeyIndex.coerceIn(0, (loadedKeys.size - 1).coerceAtLeast(0))
+                }
+                loadedKeys.isNotEmpty() -> savedPos.selectedKeyIndex.coerceIn(0, loadedKeys.lastIndex)
+                else -> 0
+            }
+            genBookKeys = loadedKeys
+            selectedKeyIndex = restoredIdx
+            isLoadingGenBookKeys = false
         } else {
+            isLoadingGenBookKeys = false
             genBookKeys = emptyList()
         }
     }
 
+    // Persist current general book / dictionary section in session once keys are loaded
+    LaunchedEffect(selectedModule, selectedKeyIndex, genBookKeys, isLoadingGenBookKeys) {
+        val mod = selectedModule ?: return@LaunchedEffect
+        if (!isLoadingGenBookKeys && !isVerseBasedModule && genBookKeys.isNotEmpty()) {
+            val clamped = selectedKeyIndex.coerceIn(0, genBookKeys.lastIndex)
+            sessionState?.saveGenBookPosition(
+                moduleInitials = mod.initials,
+                keyIndex = clamped,
+                keyName = genBookKeys.getOrNull(clamped)?.name
+            )
+        }
+    }
+
     // Content font size zoom
-    var fontSizeSp by remember { mutableStateOf(16) }
+    var fontSizeSp by remember { mutableStateOf(sessionState?.furtherStudyFontSizeSp ?: 16) }
+    LaunchedEffect(fontSizeSp) {
+        sessionState?.furtherStudyFontSizeSp = fontSizeSp
+    }
 
     // Copy to clipboard notification
     var copyNotification by remember { mutableStateOf<String?>(null) }
@@ -267,6 +373,9 @@ fun FurtherStudyView(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
+                            // Import queue status notification placed to the left of Module Info
+                            ImportQueueStatusChip(manager.importService)
+
                             // Module Info button
                             if (selectedModule != null) {
                                 OutlinedButton(
@@ -630,6 +739,19 @@ fun FurtherStudyView(
                         }
 
                         // Right: Quick Reference Search Box (e.g. Rom 8:28, John 3:16)
+                        val navigateToQuickRef = {
+                            if (quickRefInput.isNotBlank()) {
+                                val result = parseQuickReference(quickRefInput.trim(), moduleBooks)
+                                if (result != null) {
+                                    currentBookIndex = result.first
+                                    currentChapter = result.second
+                                    selectedVerseFilter = result.third
+                                    quickRefError = null
+                                } else {
+                                    quickRefError = "Could not parse reference '${quickRefInput.trim()}'"
+                                }
+                            }
+                        }
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -647,24 +769,28 @@ fun FurtherStudyView(
                                     )
                                 },
                                 singleLine = true,
-                                modifier = Modifier.width(260.dp),
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                                keyboardActions = KeyboardActions(
+                                    onGo = { navigateToQuickRef() },
+                                    onDone = { navigateToQuickRef() }
+                                ),
+                                modifier = Modifier
+                                    .width(260.dp)
+                                    .onPreviewKeyEvent { keyEvent ->
+                                        if (keyEvent.key == ComposeKey.Enter || keyEvent.key == ComposeKey.NumPadEnter) {
+                                            if (keyEvent.type == KeyEventType.KeyDown) {
+                                                navigateToQuickRef()
+                                            }
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    },
                                 textStyle = MaterialTheme.typography.bodySmall
                             )
 
                             Button(
-                                onClick = {
-                                    if (quickRefInput.isNotBlank()) {
-                                        val result = parseQuickReference(quickRefInput.trim(), moduleBooks)
-                                        if (result != null) {
-                                            currentBookIndex = result.first
-                                            currentChapter = result.second
-                                            selectedVerseFilter = result.third
-                                            quickRefError = null
-                                        } else {
-                                            quickRefError = "Could not parse reference '${quickRefInput.trim()}'"
-                                        }
-                                    }
-                                },
+                                onClick = navigateToQuickRef,
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                 modifier = Modifier.height(34.dp)
                             ) {
@@ -733,17 +859,6 @@ fun FurtherStudyView(
                                     expanded = sectionMenuExpanded,
                                     onDismissRequest = { sectionMenuExpanded = false }
                                 ) {
-                                    // Search in dropdown
-                                    OutlinedTextField(
-                                        value = genBookSearchQuery,
-                                        onValueChange = { genBookSearchQuery = it },
-                                        placeholder = { Text("Filter sections...", fontSize = 12.sp) },
-                                        singleLine = true,
-                                        modifier = Modifier
-                                            .width(280.dp)
-                                            .padding(8.dp)
-                                    )
-
                                     val filteredKeys = remember(genBookKeys, genBookSearchQuery) {
                                         if (genBookSearchQuery.isBlank()) {
                                             genBookKeys
@@ -751,6 +866,42 @@ fun FurtherStudyView(
                                             genBookKeys.filter { it.name.contains(genBookSearchQuery, ignoreCase = true) }
                                         }
                                     }
+                                    val selectFirstFilteredSection = {
+                                        val firstMatch = filteredKeys.firstOrNull()
+                                        if (firstMatch != null) {
+                                            val idx = genBookKeys.indexOf(firstMatch)
+                                            if (idx >= 0) {
+                                                selectedKeyIndex = idx
+                                                sectionMenuExpanded = false
+                                            }
+                                        }
+                                    }
+
+                                    // Search in dropdown
+                                    OutlinedTextField(
+                                        value = genBookSearchQuery,
+                                        onValueChange = { genBookSearchQuery = it },
+                                        placeholder = { Text("Filter sections...", fontSize = 12.sp) },
+                                        singleLine = true,
+                                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                                        keyboardActions = KeyboardActions(
+                                            onGo = { selectFirstFilteredSection() },
+                                            onDone = { selectFirstFilteredSection() }
+                                        ),
+                                        modifier = Modifier
+                                            .width(280.dp)
+                                            .padding(8.dp)
+                                            .onPreviewKeyEvent { keyEvent ->
+                                                if (keyEvent.key == ComposeKey.Enter || keyEvent.key == ComposeKey.NumPadEnter) {
+                                                    if (keyEvent.type == KeyEventType.KeyDown) {
+                                                        selectFirstFilteredSection()
+                                                    }
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            }
+                                    )
 
                                     filteredKeys.take(80).forEach { k ->
                                         val idx = genBookKeys.indexOf(k)
@@ -764,12 +915,15 @@ fun FurtherStudyView(
                                             trailingIcon = {
                                                 IconButton(
                                                     onClick = {
-                                                        if (selectedModule != null) {
+                                                        val mod = selectedModule
+                                                        if (mod != null) {
                                                             coroutineScope.launch {
-                                                                val secContent = manager.readKeyContent(selectedModule!!, k)
+                                                                val secContent = withContext(Dispatchers.IO) {
+                                                                    manager.readKeyContent(mod, k)
+                                                                }
                                                                 ttsService.queueSection(
                                                                     title = k.name,
-                                                                    subtitle = selectedModule?.name ?: "",
+                                                                    subtitle = mod.name,
                                                                     content = secContent,
                                                                     player = audioPlayer
                                                                 )
@@ -807,14 +961,17 @@ fun FurtherStudyView(
                             if (genBookKeys.isNotEmpty()) {
                                 OutlinedButton(
                                     onClick = {
-                                        if (selectedModule != null) {
+                                        val mod = selectedModule
+                                        if (mod != null) {
                                             coroutineScope.launch {
                                                 val nextKeys = genBookKeys.drop(selectedKeyIndex).take(5)
                                                 nextKeys.forEach { k ->
-                                                    val secContent = manager.readKeyContent(selectedModule!!, k)
+                                                    val secContent = withContext(Dispatchers.IO) {
+                                                        manager.readKeyContent(mod, k)
+                                                    }
                                                     ttsService.queueSection(
                                                         title = k.name,
-                                                        subtitle = selectedModule?.name ?: "",
+                                                        subtitle = mod.name,
                                                         content = secContent,
                                                         player = audioPlayer
                                                     )
@@ -955,7 +1112,7 @@ fun FurtherStudyView(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 Button(onClick = onOpenDownload) {
-                                    Text("Open Downloader")
+                                    Text("Manage Books")
                                 }
                             }
                         }
@@ -978,21 +1135,48 @@ fun FurtherStudyView(
                             )
                         }
                     } else {
-                        val primaryPassage = remember(selectedModule, currentModuleBook, currentChapter) {
-                            if (currentModuleBook != null) {
-                                manager.readChapter(currentModuleBook, currentChapter, selectedModule)
+                        val primaryPassageState by produceState<ChapterPassage?>(
+                            initialValue = currentModuleBook?.let { mb ->
+                                manager.getCachedChapter(Reading(mb.displayName, currentChapter), selectedModule)
+                            },
+                            key1 = selectedModule,
+                            key2 = currentModuleBook,
+                            key3 = currentChapter
+                        ) {
+                            value = if (currentModuleBook != null) {
+                                withContext(Dispatchers.IO) {
+                                    manager.readChapter(currentModuleBook, currentChapter, selectedModule)
+                                }
                             } else {
                                 ChapterPassage("", 0, emptyList(), "", error = "No book selected.")
                             }
                         }
 
-                        val secondaryPassage = if (isParallelMode && secondaryModule != null && currentModuleBook != null) {
-                            remember(secondaryModule, currentModuleBook, currentChapter) {
-                                manager.readChapter(currentModuleBook, currentChapter, secondaryModule)
+                        val secondaryPassageState by produceState<ChapterPassage?>(
+                            initialValue = if (isParallelMode && secondaryModule != null && currentModuleBook != null) {
+                                manager.getCachedChapter(Reading(currentModuleBook.displayName, currentChapter), secondaryModule)
+                            } else null,
+                            key1 = isParallelMode,
+                            key2 = secondaryModule,
+                            key3 = Triple(selectedModule, currentModuleBook, currentChapter)
+                        ) {
+                            value = if (isParallelMode && secondaryModule != null && currentModuleBook != null) {
+                                withContext(Dispatchers.IO) {
+                                    manager.readChapter(currentModuleBook, currentChapter, secondaryModule)
+                                }
+                            } else {
+                                null
                             }
-                        } else null
+                        }
 
-                        if (isParallelMode && secondaryPassage != null) {
+                        val primaryPassage = primaryPassageState
+                        val secondaryPassage = secondaryPassageState
+
+                        if (primaryPassage == null || (isParallelMode && secondaryModule != null && currentModuleBook != null && secondaryPassage == null)) {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator()
+                            }
+                        } else if (isParallelMode && secondaryPassage != null) {
                             // Split / Parallel View: primary + secondary (+ optional notes)
                             Row(
                                 modifier = Modifier
@@ -1015,6 +1199,14 @@ fun FurtherStudyView(
                                     PassageCardContent(
                                         passage = primaryPassage,
                                         book = selectedModule!!,
+                                        sectionKey = sessionState?.verseSectionKey(
+                                            pane = "primary",
+                                            moduleInitials = selectedModule!!.initials,
+                                            bookOsis = currentModuleBook?.bibleBook?.osis ?: primaryPassage.bookName,
+                                            chapter = currentChapter,
+                                            verseFilter = selectedVerseFilter
+                                        ) ?: "verse|primary|${selectedModule!!.initials}|${primaryPassage.bookName}|$currentChapter|$selectedVerseFilter",
+                                        sessionState = sessionState,
                                         fontSizeSp = fontSizeSp,
                                         selectedVerseFilter = selectedVerseFilter,
                                         isReading = isPrimaryReading,
@@ -1071,6 +1263,14 @@ fun FurtherStudyView(
                                     PassageCardContent(
                                         passage = secondaryPassage,
                                         book = secondaryModule!!,
+                                        sectionKey = sessionState?.verseSectionKey(
+                                            pane = "secondary",
+                                            moduleInitials = secondaryModule!!.initials,
+                                            bookOsis = currentModuleBook?.bibleBook?.osis ?: secondaryPassage.bookName,
+                                            chapter = currentChapter,
+                                            verseFilter = selectedVerseFilter
+                                        ) ?: "verse|secondary|${secondaryModule!!.initials}|${secondaryPassage.bookName}|$currentChapter|$selectedVerseFilter",
+                                        sessionState = sessionState,
                                         fontSizeSp = fontSizeSp,
                                         selectedVerseFilter = selectedVerseFilter,
                                         isReading = isSecondaryReading,
@@ -1146,6 +1346,14 @@ fun FurtherStudyView(
                                     PassageCardContent(
                                         passage = primaryPassage,
                                         book = selectedModule!!,
+                                        sectionKey = sessionState?.verseSectionKey(
+                                            pane = "primary",
+                                            moduleInitials = selectedModule!!.initials,
+                                            bookOsis = currentModuleBook?.bibleBook?.osis ?: primaryPassage.bookName,
+                                            chapter = currentChapter,
+                                            verseFilter = selectedVerseFilter
+                                        ) ?: "verse|primary|${selectedModule!!.initials}|${primaryPassage.bookName}|$currentChapter|$selectedVerseFilter",
+                                        sessionState = sessionState,
                                         fontSizeSp = fontSizeSp,
                                         selectedVerseFilter = selectedVerseFilter,
                                         isReading = isPrimaryReading,
@@ -1205,20 +1413,38 @@ fun FurtherStudyView(
                     // General Book / Dictionary Reading Surface
                     val activeKey = genBookKeys.getOrNull(selectedKeyIndex)
                     val hasActiveKeyContent = selectedModule != null && activeKey != null
-                    val keyContent = remember(selectedModule, activeKey) {
-                        if (selectedModule != null && activeKey != null) {
-                            manager.readKeyContent(selectedModule!!, activeKey)
+                    val keyContentPairState by produceState<Pair<String, List<String>>?>(
+                        initialValue = manager.getCachedKeyContent(selectedModule, activeKey)?.let { cached ->
+                            cached to TtsTextCleaner.splitIntoParagraphs(cached)
+                        },
+                        key1 = selectedModule,
+                        key2 = activeKey,
+                        key3 = isLoadingGenBookKeys
+                    ) {
+                        if (isLoadingGenBookKeys) {
+                            value = null
+                        } else if (selectedModule != null && activeKey != null) {
+                            val mod = selectedModule!!
+                            val loaded = withContext(Dispatchers.IO) {
+                                manager.readKeyContent(mod, activeKey)
+                            }
+                            val split = withContext(Dispatchers.Default) {
+                                TtsTextCleaner.splitIntoParagraphs(loaded)
+                            }
+                            value = loaded to split
                         } else {
-                            "No content available for this selection."
+                            value = "No content available for this selection." to emptyList()
                         }
                     }
-                    val paragraphs = remember(keyContent, hasActiveKeyContent) {
-                        if (hasActiveKeyContent) {
-                            TtsTextCleaner.splitIntoParagraphs(keyContent)
-                        } else {
-                            emptyList()
+
+                    val loadedPair = keyContentPairState
+                    if (isLoadingGenBookKeys || loadedPair == null) {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator()
                         }
-                    }
+                    } else {
+                        val keyContent = loadedPair.first
+                        val paragraphs = loadedPair.second
 
                     Row(
                         modifier = Modifier
@@ -1313,7 +1539,7 @@ fun FurtherStudyView(
                                         // Save Audio to File button (Requirement 3)
                                         OutlinedButton(
                                             onClick = {
-                                                val safeName = sectionTitle.replace(Regex("[^a-zA-Z0-9.-]"), "_")
+                                                val safeName = sectionTitle.replace(SAFE_EXPORT_FILENAME_REGEX, "_")
                                                 TtsFileUtils.openSaveAudioFileDialog(defaultFilename = safeName) { destFile ->
                                                     coroutineScope.launch {
                                                         val speechText = TtsTextCleaner.formatSectionForSpeech(
@@ -1347,11 +1573,21 @@ fun FurtherStudyView(
                                 HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
 
                                 // Paragraph-by-paragraph text content with per-paragraph TTS options
+                                val genBookSectionKey = sessionState?.genBookSectionKey(
+                                    moduleInitials = selectedModule?.initials ?: "",
+                                    keyIndex = selectedKeyIndex,
+                                    keyName = activeKey?.name
+                                ) ?: "genbook|${selectedModule?.initials}|$selectedKeyIndex|${activeKey?.name.orEmpty()}"
                                 if (!hasActiveKeyContent || paragraphs.isEmpty()) {
+                                    val textScrollState = rememberTrackedScrollState(
+                                        sectionKey = "$genBookSectionKey|text",
+                                        initialValue = { sessionState?.getSectionScrollPosition("$genBookSectionKey|text")?.verticalScrollValue ?: 0 },
+                                        onSaveValue = { v -> sessionState?.saveSectionVerticalScroll("$genBookSectionKey|text", v) }
+                                    )
                                     Box(
                                         modifier = Modifier
                                             .fillMaxSize()
-                                            .verticalScroll(rememberScrollState())
+                                            .verticalScroll(textScrollState)
                                     ) {
                                         Text(
                                             text = keyContent,
@@ -1363,7 +1599,11 @@ fun FurtherStudyView(
                                 } else {
                                     val sectionTitle = activeKey?.name ?: "Section"
                                     val moduleSubtitle = selectedModule?.name ?: ""
-                                    val paragraphListState = remember(selectedModule, activeKey) { LazyListState() }
+                                    val paragraphListState = rememberTrackedLazyListState(
+                                        sectionKey = "$genBookSectionKey|paras",
+                                        initialPosition = { sessionState?.getSectionScrollPosition("$genBookSectionKey|paras") ?: SessionScrollPosition() },
+                                        onSavePosition = { idx, off -> sessionState?.saveSectionLazyScroll("$genBookSectionKey|paras", idx, off) }
+                                    )
 
                                     LazyColumn(
                                         state = paragraphListState,
@@ -1419,6 +1659,7 @@ fun FurtherStudyView(
                                     .fillMaxHeight()
                             )
                         }
+                    }
                     }
                 }
             }
@@ -1526,6 +1767,8 @@ private fun ParagraphTtsRow(
 private fun PassageCardContent(
     passage: ChapterPassage,
     book: Book,
+    sectionKey: String,
+    sessionState: SessionReadingState?,
     fontSizeSp: Int,
     selectedVerseFilter: Int,
     isReading: Boolean = false,
@@ -1651,7 +1894,13 @@ private fun PassageCardContent(
 
             if (book.bookCategory != BookCategory.BIBLE && fullTextParagraphs.isNotEmpty() && ttsService != null && audioPlayer != null) {
                 val sectionTitle = "${passage.bookName} ${passage.chapterNumber}"
+                val paragraphListState = rememberTrackedLazyListState(
+                    sectionKey = "$sectionKey|paras",
+                    initialPosition = { sessionState?.getSectionScrollPosition("$sectionKey|paras") ?: SessionScrollPosition() },
+                    onSavePosition = { idx, off -> sessionState?.saveSectionLazyScroll("$sectionKey|paras", idx, off) }
+                )
                 LazyColumn(
+                    state = paragraphListState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1690,10 +1939,15 @@ private fun PassageCardContent(
                     }
                 }
             } else {
+                val fallbackScrollState = rememberTrackedScrollState(
+                    sectionKey = "$sectionKey|text",
+                    initialValue = { sessionState?.getSectionScrollPosition("$sectionKey|text")?.verticalScrollValue ?: 0 },
+                    onSaveValue = { v -> sessionState?.saveSectionVerticalScroll("$sectionKey|text", v) }
+                )
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
+                        .verticalScroll(fallbackScrollState)
                 ) {
                     Text(
                         text = passage.fullText.ifBlank { "No text available for this passage." },
@@ -1704,7 +1958,11 @@ private fun PassageCardContent(
                 }
             }
         } else {
-            val listState = rememberLazyListState()
+            val listState = rememberTrackedLazyListState(
+                sectionKey = "$sectionKey|verses",
+                initialPosition = { sessionState?.getSectionScrollPosition("$sectionKey|verses") ?: SessionScrollPosition() },
+                onSavePosition = { idx, off -> sessionState?.saveSectionLazyScroll("$sectionKey|verses", idx, off) }
+            )
             val displayedVerses = remember(passage.verses, selectedVerseFilter) {
                 if (selectedVerseFilter > 0) {
                     passage.verses.filter { it.verseNumber == selectedVerseFilter }
@@ -1929,9 +2187,9 @@ private fun copyTextToClipboard(text: String) {
  * Returns a Triple of (bookIndex, chapter, verse) on success, or null if the
  * reference cannot be matched to a book in the module.
  */
-private fun parseQuickReference(input: String, moduleBooks: List<ModuleBook>): Triple<Int, Int, Int>? {
+internal fun parseQuickReference(input: String, moduleBooks: List<ModuleBook>): Triple<Int, Int, Int>? {
     val clean = input.trim()
-    val match = Regex("""^([1-3]?\s*[A-Za-z]+(?:\s+[A-Za-z]+)?)\s*(\d+)?(?::(\d+))?""").find(clean) ?: return null
+    val match = QUICK_REF_REGEX.find(clean) ?: return null
     val bookStr = match.groupValues[1].trim()
     val chapterStr = match.groupValues.getOrNull(2)?.trim()
     val verseStr = match.groupValues.getOrNull(3)?.trim()

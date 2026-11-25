@@ -66,6 +66,22 @@ class PlanStateJSwordIntegrationTest {
         assertTrue(state.showDownloadDialog)
         state.showDownloadDialog = false
         assertFalse(state.showDownloadDialog)
+
+        assertEquals(0, state.addBooksInitialTab)
+        state.openAddBooksDialog(2)
+        assertTrue(state.showDownloadDialog)
+        assertEquals(2, state.addBooksInitialTab)
+
+        state.openAddBooksDialog(1)
+        assertEquals(1, state.addBooksInitialTab)
+
+        // Out-of-range tab index should be clamped to [0, 2]
+        state.openAddBooksDialog(99)
+        assertEquals(2, state.addBooksInitialTab)
+        state.openAddBooksDialog(-3)
+        assertEquals(0, state.addBooksInitialTab)
+        state.showDownloadDialog = false
+        assertFalse(state.showDownloadDialog)
     }
 
     @Test

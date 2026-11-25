@@ -19,7 +19,7 @@ import java.io.File
 
 sealed class ImportItemStatus {
     object Pending : ImportItemStatus()
-    data class InProgress(val step: String) : ImportItemStatus()
+    data class InProgress(val step: String, val fraction: Float = 0.05f) : ImportItemStatus()
     data class Success(val book: Book) : ImportItemStatus()
     data class Failed(val errorMessage: String) : ImportItemStatus()
 }
@@ -137,7 +137,7 @@ class BookImportService(
                     val nextItem = synchronized(queueLock) {
                         val item = queueItems.firstOrNull { it.status is ImportItemStatus.Pending }
                         if (item != null) {
-                            updateItemStatusLocked(item.id, ImportItemStatus.InProgress("Starting import..."))
+                            updateItemStatusLocked(item.id, ImportItemStatus.InProgress("Starting import...", 0.05f))
                             isProcessing = true
                         } else {
                             isProcessing = false
@@ -145,9 +145,9 @@ class BookImportService(
                         item
                     } ?: break
 
-                    val result = importFile(nextItem.file) { step ->
+                    val result = importFileInternal(nextItem.file) { step, fraction ->
                         synchronized(queueLock) {
-                            updateItemStatusLocked(nextItem.id, ImportItemStatus.InProgress(step))
+                            updateItemStatusLocked(nextItem.id, ImportItemStatus.InProgress(step, fraction))
                         }
                     }
 
@@ -187,6 +187,13 @@ class BookImportService(
     suspend fun importFile(
         file: File,
         onProgress: ((step: String) -> Unit)? = null
+    ): Result<Book> = importFileInternal(file) { step, _ ->
+        onProgress?.invoke(step)
+    }
+
+    private suspend fun importFileInternal(
+        file: File,
+        onProgress: ((step: String, fraction: Float) -> Unit)? = null
     ): Result<Book> = withContext(Dispatchers.IO) {
         try {
             require(file.exists() && file.isFile) { "File does not exist: ${file.absolutePath}" }
@@ -199,16 +206,16 @@ class BookImportService(
                     )
                 )
 
-            onProgress?.invoke("Parsing ${importer.formatName} file...")
+            onProgress?.invoke("Parsing ${importer.formatName} file...", 0.20f)
             val importedBook = importer.parse(file)
 
-            onProgress?.invoke("Compiling into Sword module (${importedBook.chapters.size} sections)...")
+            onProgress?.invoke("Compiling into Sword module (${importedBook.chapters.size} sections)...", 0.60f)
             val compilation = SwordGenBookWriter.write(
                 appDir = manager.appDir,
                 book = importedBook
             )
 
-            onProgress?.invoke("Refreshing installed modules...")
+            onProgress?.invoke("Refreshing installed modules...", 0.90f)
             withContext(Dispatchers.Main) {
                 manager.refreshInstalledBooks()
             }

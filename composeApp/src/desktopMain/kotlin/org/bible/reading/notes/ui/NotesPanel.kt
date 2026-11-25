@@ -4,9 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -15,6 +13,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.bible.reading.notes.NoteExportFormat
 import org.bible.reading.notes.NotesRepository
 import org.bible.reading.notes.StudyNote
@@ -41,6 +41,8 @@ fun NotesPanel(
     moduleDisplayName: String,
     modifier: Modifier = Modifier
 ) {
+    val panelScope = rememberCoroutineScope()
+
     // All notes for the current module, re-derived whenever the repository list changes.
     val moduleNotes by remember(repository.notes, moduleKey) {
         derivedStateOf { repository.notesFor(moduleKey) }
@@ -67,11 +69,30 @@ fun NotesPanel(
     // Export dialog
     var showExportDialog by remember { mutableStateOf(false) }
 
-    // Autosave: flush edits to repository whenever local buffer changes (debounce via LaunchedEffect key)
+    // Debounced autosave off the UI thread
     val noteIdForSave = selectedNote?.id
-    LaunchedEffect(editTitle, editBody) {
-        if (noteIdForSave != null) {
-            repository.updateNote(noteIdForSave, editTitle, editBody)
+    val latestTitle by rememberUpdatedState(editTitle)
+    val latestBody by rememberUpdatedState(editBody)
+
+    LaunchedEffect(noteIdForSave, editTitle, editBody) {
+        val targetId = noteIdForSave ?: return@LaunchedEffect
+        val existing = repository.notes.firstOrNull { it.id == targetId } ?: return@LaunchedEffect
+        if (existing.title == editTitle && existing.body == editBody) return@LaunchedEffect
+        delay(400L)
+        repository.updateNoteAsync(targetId, editTitle, editBody)
+    }
+
+    // Flush any pending unsaved edits when switching notes or closing the panel
+    DisposableEffect(noteIdForSave) {
+        onDispose {
+            val targetId = noteIdForSave ?: return@onDispose
+            val existing = repository.notes.firstOrNull { it.id == targetId } ?: return@onDispose
+            if (existing.title != latestTitle || existing.body != latestBody) {
+                val updated = repository.updateNoteInMemory(targetId, latestTitle, latestBody)
+                if (updated != null) {
+                    repository.persistNoteInBackground(updated)
+                }
+            }
         }
     }
 
@@ -142,8 +163,10 @@ fun NotesPanel(
                     // New note button
                     FilledTonalButton(
                         onClick = {
-                            val newNote = repository.createNote(moduleKey, moduleDisplayName)
-                            selectedNoteId = newNote.id
+                            panelScope.launch {
+                                val newNote = repository.createNoteAndPersistAsync(moduleKey, moduleDisplayName)
+                                selectedNoteId = newNote.id
+                            }
                         },
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                         modifier = Modifier.height(28.dp)
@@ -161,9 +184,9 @@ fun NotesPanel(
                     notes = moduleNotes,
                     selectedNoteId = selectedNoteId,
                     onSelectNote = { selectedNoteId = it },
-                    onSetDefault = { repository.setDefault(it) },
+                    onSetDefault = { repository.setDefaultAsync(it) },
                     onDeleteNote = { id ->
-                        repository.deleteNote(id)
+                        repository.deleteNoteAsync(id)
                         // selectedNoteId will be synced via LaunchedEffect above
                     }
                 )
@@ -194,8 +217,10 @@ fun NotesPanel(
                         )
                         Button(
                             onClick = {
-                                val newNote = repository.createNote(moduleKey, moduleDisplayName)
-                                selectedNoteId = newNote.id
+                                panelScope.launch {
+                                    val newNote = repository.createNoteAndPersistAsync(moduleKey, moduleDisplayName)
+                                    selectedNoteId = newNote.id
+                                }
                             }
                         ) {
                             Text("Create First Note")
@@ -228,7 +253,7 @@ fun NotesPanel(
                             Checkbox(
                                 checked = selectedNote.isDefault,
                                 onCheckedChange = { checked ->
-                                    if (checked) repository.setDefault(selectedNote.id)
+                                    if (checked) repository.setDefaultAsync(selectedNote.id)
                                 },
                                 modifier = Modifier.size(20.dp)
                             )
@@ -259,7 +284,7 @@ fun NotesPanel(
                     // Delete button (only for single note; multi-note deletes are in the tab row)
                     if (moduleNotes.size == 1) {
                         TextButton(
-                            onClick = { repository.deleteNote(selectedNote.id) },
+                            onClick = { repository.deleteNoteAsync(selectedNote.id) },
                             contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
                         ) {
                             Text(
@@ -432,6 +457,7 @@ fun NoteExportDialog(
     repository: NotesRepository,
     onDismiss: () -> Unit
 ) {
+    val exportScope = rememberCoroutineScope()
     var exportDir by remember { mutableStateOf("~/downloads") }
     var exportFormat by remember { mutableStateOf(NoteExportFormat.MARKDOWN) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
@@ -532,15 +558,17 @@ fun NoteExportDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    try {
-                        val file = repository.exportNote(note, exportDir, exportFormat)
-                        lastFile = file
-                        isSuccess = true
-                        statusMessage = "Saved to ${file.absolutePath}"
-                    } catch (e: Exception) {
-                        isSuccess = false
-                        statusMessage = "Export failed: ${e.message}"
-                        lastFile = null
+                    exportScope.launch {
+                        try {
+                            val file = repository.exportNoteAsync(note, exportDir, exportFormat)
+                            lastFile = file
+                            isSuccess = true
+                            statusMessage = "Saved to ${file.absolutePath}"
+                        } catch (e: Exception) {
+                            isSuccess = false
+                            statusMessage = "Export failed: ${e.message}"
+                            lastFile = null
+                        }
                     }
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)

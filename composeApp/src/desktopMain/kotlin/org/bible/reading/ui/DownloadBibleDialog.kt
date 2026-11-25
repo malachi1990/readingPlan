@@ -21,7 +21,6 @@ import kotlinx.coroutines.launch
 import org.bible.reading.jsword.SwordManager
 import org.crosswire.jsword.book.Book
 import org.crosswire.jsword.book.BookCategory
-import java.io.File
 
 enum class DownloadCategoryFilter(val displayName: String, val category: BookCategory?) {
     ALL("All", null),
@@ -37,14 +36,30 @@ enum class LocationFilter(val displayName: String) {
     SYSTEM("System Modules (~/.sword)")
 }
 
+internal fun filterBooksByQuery(books: List<Book>, query: String): List<Book> {
+    if (query.isBlank()) return books
+    val q = query.trim().lowercase()
+    return books.filter { b ->
+        b.name.lowercase().contains(q) ||
+            b.initials.lowercase().contains(q) ||
+            (b.language?.name?.lowercase()?.contains(q) == true)
+    }
+}
+
 @Composable
 fun DownloadBibleDialog(
     manager: SwordManager,
-    onDismissRequest: () -> Unit
+    initialTab: Int = 0,
+    onDismissRequest: () -> Unit,
+    onOpenStudy: (Book) -> Unit = {}
 ) {
     val coroutineScope = rememberCoroutineScope()
-    var selectedTab by remember { mutableStateOf(0) } // 0: Browse & Download, 1: Installed Books
+    var selectedTab by remember { mutableStateOf(initialTab.coerceIn(0, 2)) } // 0: Install from Remote, 1: Installed Books, 2: Import from Local
+    LaunchedEffect(initialTab) {
+        selectedTab = initialTab.coerceIn(0, 2)
+    }
     var searchQuery by remember { mutableStateOf("") }
+    var installedSearchQuery by remember { mutableStateOf("") }
     var categoryFilter by remember { mutableStateOf(DownloadCategoryFilter.BIBLES) }
     var installerMenuExpanded by remember { mutableStateOf(false) }
 
@@ -75,7 +90,7 @@ fun DownloadBibleDialog(
                     Column {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
-                                text = "Bible & Book Downloader",
+                                text = "Manage Books",
                                 style = MaterialTheme.typography.headlineSmall,
                                 fontWeight = FontWeight.Bold
                             )
@@ -92,7 +107,7 @@ fun DownloadBibleDialog(
                             }
                         }
                         Text(
-                            text = "Download Bibles, commentaries, and books. Files are saved directly to ${manager.appDir.absolutePath}",
+                            text = "Install Bibles, commentaries, and books from remote repositories or local files. Saved to ${manager.appDir.absolutePath}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -111,17 +126,29 @@ fun DownloadBibleDialog(
                     Tab(
                         selected = selectedTab == 0,
                         onClick = { selectedTab = 0 },
-                        text = { Text("Browse & Download", fontWeight = FontWeight.SemiBold) }
+                        text = { Text("Install from Remote", fontWeight = FontWeight.SemiBold) }
                     )
                     Tab(
                         selected = selectedTab == 1,
                         onClick = { selectedTab = 1 },
                         text = { Text("Installed Books (${manager.installedBooks.size})", fontWeight = FontWeight.SemiBold) }
                     )
+                    val queueCount = manager.importService.queueItems.size
+                    Tab(
+                        selected = selectedTab == 2,
+                        onClick = { selectedTab = 2 },
+                        text = {
+                            Text(
+                                if (queueCount > 0) "Import from Local ($queueCount)" else "Import from Local",
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    )
                 }
 
                 // Status message banner
-                manager.lastOperationMessage?.let { msg ->
+                if (selectedTab != 2) {
+                    manager.lastOperationMessage?.let { msg ->
                     val bgColor = if (manager.isOperationSuccess) {
                         MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
                     } else {
@@ -154,22 +181,46 @@ fun DownloadBibleDialog(
                             Text("Dismiss", style = MaterialTheme.typography.labelSmall)
                         }
                     }
+                    }
                 }
 
-                if (selectedTab == 0) {
-                    // TAB 0: Browse & Download
-                    BrowseAndDownloadContent(
-                        manager = manager,
-                        searchQuery = searchQuery,
-                        onSearchQueryChange = { searchQuery = it },
-                        categoryFilter = categoryFilter,
-                        onCategoryFilterChange = { categoryFilter = it },
-                        installerMenuExpanded = installerMenuExpanded,
-                        onInstallerMenuExpandedChange = { installerMenuExpanded = it }
-                    )
-                } else {
-                    // TAB 1: Installed Books
-                    InstalledBooksContent(manager = manager)
+                Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                    when (selectedTab) {
+                        0 -> {
+                            // TAB 0: Install from Remote
+                            Column(
+                                modifier = Modifier.fillMaxSize(),
+                                verticalArrangement = Arrangement.spacedBy(14.dp)
+                            ) {
+                                BrowseAndDownloadContent(
+                                    manager = manager,
+                                    searchQuery = searchQuery,
+                                    onSearchQueryChange = { searchQuery = it },
+                                    categoryFilter = categoryFilter,
+                                    onCategoryFilterChange = { categoryFilter = it },
+                                    installerMenuExpanded = installerMenuExpanded,
+                                    onInstallerMenuExpandedChange = { installerMenuExpanded = it }
+                                )
+                            }
+                        }
+                        1 -> {
+                            // TAB 1: Installed Books
+                            InstalledBooksContent(
+                                manager = manager,
+                                searchQuery = installedSearchQuery,
+                                onSearchQueryChange = { installedSearchQuery = it }
+                            )
+                        }
+                        else -> {
+                            // TAB 2: Import from Local
+                            LocalBookImportContent(
+                                manager = manager,
+                                onDismiss = onDismissRequest,
+                                onImportSuccess = onOpenStudy,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -289,14 +340,7 @@ private fun BrowseAndDownloadContent(
         if (categoryFilter.category != null) {
             list = list.filter { it.bookCategory == categoryFilter.category }
         }
-        if (searchQuery.isNotBlank()) {
-            val q = searchQuery.trim().lowercase()
-            list = list.filter { b ->
-                b.name.lowercase().contains(q) ||
-                        b.initials.lowercase().contains(q) ||
-                        (b.language?.name?.lowercase()?.contains(q) == true)
-            }
-        }
+        list = filterBooksByQuery(list, searchQuery)
         list
     }
 
@@ -447,7 +491,11 @@ private fun BrowseAndDownloadContent(
 }
 
 @Composable
-private fun InstalledBooksContent(manager: SwordManager) {
+private fun InstalledBooksContent(
+    manager: SwordManager,
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit
+) {
     val coroutineScope = rememberCoroutineScope()
     var locationFilter by remember { mutableStateOf(LocationFilter.ALL) }
 
@@ -458,10 +506,13 @@ private fun InstalledBooksContent(manager: SwordManager) {
         manager.installedBooks.filter { !manager.isAppDirectoryBook(it) }
     }
 
-    val displayedBooks = when (locationFilter) {
+    val locationBooks = when (locationFilter) {
         LocationFilter.ALL -> manager.installedBooks
         LocationFilter.APP_DIR -> appBooks
         LocationFilter.SYSTEM -> systemBooks
+    }
+    val displayedBooks = remember(locationBooks.toList(), searchQuery) {
+        filterBooksByQuery(locationBooks, searchQuery)
     }
 
     Column(
@@ -485,25 +536,22 @@ private fun InstalledBooksContent(manager: SwordManager) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedButton(
-                    onClick = {
-                        openBooksFileChooser { files ->
-                            manager.enqueueBookImports(files)
-                            manager.importService.isQueueDialogOpen = true
-                        }
-                    }
-                ) {
-                    Text("📥 Import Book")
-                }
-                Button(
-                    onClick = { manager.refreshInstalledBooks() },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
-                ) {
-                    Text("Refresh Installed")
-                }
+            Button(
+                onClick = { manager.refreshInstalledBooks() },
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
+            ) {
+                Text("Refresh Installed")
             }
         }
+
+        // Search box matching "Install from Remote"
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = onSearchQueryChange,
+            placeholder = { Text("Search by title, abbreviation (e.g. KJV, ASV), or language...") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
 
         // Location filter chips
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -533,8 +581,10 @@ private fun InstalledBooksContent(manager: SwordManager) {
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = if (locationFilter == LocationFilter.APP_DIR)
-                        "No books currently in ~/.bibleReadingPlan. Switch to 'Browse & Download' to download books to the app directory."
+                    text = if (searchQuery.isNotBlank())
+                        "No installed books match \"${searchQuery.trim()}\"."
+                    else if (locationFilter == LocationFilter.APP_DIR)
+                        "No books currently in ~/.bibleReadingPlan. Switch to 'Install from Remote' or 'Import from Local' to add books to the app directory."
                     else
                         "No books found matching this filter.",
                     style = MaterialTheme.typography.bodyMedium,

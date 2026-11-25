@@ -16,7 +16,6 @@ import org.bible.reading.strategy.ContinuationStrategyType
 import org.bible.reading.strategy.DayOfWeekStrategy
 import org.bible.reading.strategy.SimpleSequentialStrategy
 import org.bible.reading.strategy.Strategy
-import org.bible.reading.strategy.StrategyRegistry
 import org.bible.reading.strategy.WeekdayOnlyStrategy
 import org.bible.reading.tts.TtsService
 import java.io.File
@@ -31,8 +30,7 @@ enum class MainAppTab(val title: String) {
 enum class PlanStrategyChoice(val displayName: String, val description: String) {
     DAY_OF_WEEK("Day of Week Plan", "Assign books to specific days of the week with configurable continuation rules"),
     SIMPLE_SEQUENTIAL("Sequential", "Read straight through books from start to finish"),
-    WEEKDAY_ONLY("Weekday Only", "Read on weekdays (Monday-Friday) and rest on weekends"),
-    CUSTOM_STRATEGY("Custom Pluggable Strategy", "Use a registered or user-defined custom strategy")
+    WEEKDAY_ONLY("Weekday Only", "Read on weekdays (Monday-Friday) and rest on weekends")
 }
 
 class PlanState(planStorageDir: File? = null) {
@@ -49,6 +47,15 @@ class PlanState(planStorageDir: File? = null) {
     var viewingDailyReading by mutableStateOf<DailyReading?>(null)
     var showDownloadDialog by mutableStateOf(false)
 
+    // In-session module, chapter/section, and scroll tracking across tab switches
+    val sessionReadingState = SessionReadingState()
+    var addBooksInitialTab by mutableStateOf(0)
+
+    fun openAddBooksDialog(tab: Int = 0) {
+        addBooksInitialTab = tab.coerceIn(0, 2)
+        showDownloadDialog = true
+    }
+
     // Audio Bible Service & settings dialog
     val audioService: AudioBibleService = AudioBibleService(swordManager.appDir)
     var showAudioSettingsDialog by mutableStateOf(false)
@@ -56,6 +63,12 @@ class PlanState(planStorageDir: File? = null) {
     // Text-to-Speech Service & settings dialog
     val ttsService: TtsService = TtsService(swordManager.appDir)
     var showTtsSettingsDialog by mutableStateOf(false)
+    var audioTtsSettingsInitialTab by mutableStateOf(0)
+
+    fun openAudioTtsSettingsDialog(tab: Int = 0) {
+        audioTtsSettingsInitialTab = tab.coerceIn(0, 2)
+        showTtsSettingsDialog = true
+    }
 
     // Strategy selection
     var selectedStrategyChoice by mutableStateOf(PlanStrategyChoice.DAY_OF_WEEK)
@@ -189,28 +202,33 @@ class PlanState(planStorageDir: File? = null) {
     }
 
     fun addBookToDay(day: DayOfWeek, book: Bible) {
-        val list = booksByDay.getOrPut(day) { mutableListOf() }
-        if (!list.contains(book)) {
-            list.add(book)
-            booksByDay[day] = list.toMutableList()
+        val current = booksByDay[day].orEmpty()
+        if (!current.contains(book)) {
+            booksByDay[day] = (current + book).toMutableList()
         }
     }
 
     fun removeBookFromDay(day: DayOfWeek, book: Bible) {
-        val list = booksByDay[day] ?: return
-        list.remove(book)
-        booksByDay[day] = list.toMutableList()
+        val current = booksByDay[day] ?: return
+        val updated = current.filterTo(mutableListOf()) { it != book }
+        if (updated.size != current.size) {
+            booksByDay[day] = updated
+        }
     }
 
     fun addCollectionToDay(day: DayOfWeek, collection: BookCollection) {
         val booksToAdd = Bible.getBooksInOrder().filter { it.collection == collection }
-        val list = booksByDay.getOrPut(day) { mutableListOf() }
+        val updated = booksByDay[day].orEmpty().toMutableList()
+        var changed = false
         for (b in booksToAdd) {
-            if (!list.contains(b)) {
-                list.add(b)
+            if (!updated.contains(b)) {
+                updated.add(b)
+                changed = true
             }
         }
-        booksByDay[day] = list.toMutableList()
+        if (changed) {
+            booksByDay[day] = updated
+        }
     }
 
     fun clearDay(day: DayOfWeek) {
@@ -243,7 +261,6 @@ class PlanState(planStorageDir: File? = null) {
                 booksByDay.mapValues { it.value.toList() },
                 customCollectionOrderMapping.toMap()
             )
-            ContinuationStrategyType.CUSTOM -> ContinuationStrategy.byDayOrder(customDayOrderMapping.toMap())
         }
     }
 
@@ -270,15 +287,6 @@ class PlanState(planStorageDir: File? = null) {
             }
             PlanStrategyChoice.WEEKDAY_ONLY -> {
                 WeekdayOnlyStrategy(chaptersPerWeekday = chaptersPerDay)
-            }
-            PlanStrategyChoice.CUSTOM_STRATEGY -> {
-                selectedCustomStrategyName?.let { StrategyRegistry.getStrategy(it) }
-                    ?: DayOfWeekStrategy(
-                        chaptersPerDay = chaptersPerDay,
-                        chaptersOnSunday = chaptersOnSunday,
-                        booksByDay = booksByDay.mapValues { it.value.toList() },
-                        continuationStrategy = contStrategy
-                    )
             }
         }
     }

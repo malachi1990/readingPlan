@@ -17,7 +17,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.bible.reading.audio.player.AudioBiblePlayer
+import org.bible.reading.audio.service.AudioBibleService
+import org.bible.reading.audio.ui.AudioBibleSettingsContent
+import org.bible.reading.audio.ui.AudioBibleSettingsDraft
 import org.bible.reading.tts.TtsEngineType
 import org.bible.reading.tts.TtsService
 import org.bible.reading.tts.TtsVoice
@@ -27,10 +33,32 @@ import org.bible.reading.tts.TtsVoiceCatalog
 fun TtsSettingsDialog(
     ttsService: TtsService,
     player: AudioBiblePlayer,
+    audioService: AudioBibleService? = null,
+    initialTab: Int = 0,
     onDismiss: () -> Unit
 ) {
-    var activeTab by remember { mutableStateOf(0) } // 0: Voices & Engine, 1: Playback & Cache
-    var cacheBytes by remember { mutableLongStateOf(ttsService.getCacheSizeBytes()) }
+    val dialogScope = rememberCoroutineScope()
+    val maxTab = if (audioService != null) 2 else 1
+    var activeTab by remember { mutableStateOf(initialTab.coerceIn(0, maxTab)) } // 0: Voices & Engines, 1: Speech Rate & Cache, 2: Audio Bible
+    LaunchedEffect(initialTab, maxTab) {
+        activeTab = initialTab.coerceIn(0, maxTab)
+    }
+    var cacheBytes by remember { mutableLongStateOf(0L) }
+    var audioDraft by remember(audioService) {
+        mutableStateOf(audioService?.let { AudioBibleSettingsDraft.fromService(it) })
+    }
+
+    val applyPendingAudioChanges = {
+        val svc = audioService
+        val draft = audioDraft
+        if (svc != null && draft != null && draft.hasChangesFrom(svc)) {
+            draft.applyTo(svc)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        cacheBytes = ttsService.getCacheSizeBytesAsync()
+    }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -59,12 +87,12 @@ fun TtsSettingsDialog(
                         Text("🔊", fontSize = 24.sp)
                         Column {
                             Text(
-                                text = "Text-to-Speech Voice Settings",
+                                text = "Audio & Text-to-Speech Settings",
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "Natural AI voice narration for modules and scripture",
+                                text = "Configure AI narration voices, playback speed, and audio Bible files",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -78,7 +106,7 @@ fun TtsSettingsDialog(
 
                 Spacer(Modifier.height(14.dp))
 
-                // Tabs: Voices / Audio Settings
+                // Tabs: Voices & Engines / Speech Rate & Cache / Audio Bible
                 TabRow(
                     selectedTabIndex = activeTab,
                     modifier = Modifier.fillMaxWidth()
@@ -93,17 +121,34 @@ fun TtsSettingsDialog(
                         onClick = { activeTab = 1 },
                         text = { Text("Speech Rate & Cache", fontWeight = FontWeight.SemiBold) }
                     )
+                    if (audioService != null) {
+                        Tab(
+                            selected = activeTab == 2,
+                            onClick = { activeTab = 2 },
+                            text = { Text("Audio Bible", fontWeight = FontWeight.SemiBold) }
+                        )
+                    }
                 }
 
                 Spacer(Modifier.height(14.dp))
 
                 // Tab Content
                 Box(modifier = Modifier.weight(1f)) {
-                    if (activeTab == 0) {
-                        VoicesTabContent(ttsService, player)
-                    } else {
-                        PlaybackAndCacheTabContent(ttsService, cacheBytes) {
-                            cacheBytes = ttsService.getCacheSizeBytes()
+                    when (activeTab) {
+                        0 -> VoicesTabContent(ttsService, player)
+                        1 -> PlaybackAndCacheTabContent(ttsService, cacheBytes) {
+                            dialogScope.launch {
+                                ttsService.clearCacheAsync()
+                                cacheBytes = ttsService.getCacheSizeBytesAsync()
+                            }
+                        }
+                        else -> audioService?.let { svc ->
+                            val currentDraft = audioDraft ?: AudioBibleSettingsDraft.fromService(svc)
+                            AudioBibleSettingsContent(
+                                audioService = svc,
+                                draft = currentDraft,
+                                onDraftChange = { audioDraft = it }
+                            )
                         }
                     }
                 }
@@ -148,13 +193,23 @@ fun TtsSettingsDialog(
                 ) {
                     // Active voice quick label
                     val activeVoice = ttsService.getActiveVoice()
+                    val audioSummary = if (audioService != null && audioService.totalChaptersMatched > 0) {
+                        " • Audio Bible: ${audioService.totalChaptersMatched} ch"
+                    } else {
+                        ""
+                    }
                     Text(
-                        text = "Active: ${activeVoice.name} (${activeVoice.engineType.displayName})",
+                        text = "Active: ${activeVoice.name} (${activeVoice.engineType.displayName})$audioSummary",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
-                    Button(onClick = onDismiss) {
+                    Button(
+                        onClick = {
+                            applyPendingAudioChanges()
+                            onDismiss()
+                        }
+                    ) {
                         Text("Done")
                     }
                 }
@@ -168,8 +223,49 @@ private fun VoicesTabContent(
     ttsService: TtsService,
     player: AudioBiblePlayer
 ) {
+    val tabScope = rememberCoroutineScope()
     val prefs = ttsService.preferences
     val currentEngine = prefs.selectedEngine
+    val voices = remember(currentEngine) { TtsVoiceCatalog.getVoicesForEngine(currentEngine) }
+
+    var readinessRevision by remember { mutableIntStateOf(0) }
+    var piperInstalled by remember { mutableStateOf<Boolean?>(null) }
+    var kokoroAvailable by remember { mutableStateOf<Boolean?>(null) }
+    var voiceReadiness by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
+
+    LaunchedEffect(
+        currentEngine,
+        prefs.kokoroPythonPath,
+        prefs.kokoroBinaryPath,
+        prefs.kokoroVoicesPath,
+        ttsService.isDownloading,
+        readinessRevision
+    ) {
+        withContext(Dispatchers.IO) {
+            when (currentEngine) {
+                TtsEngineType.PIPER -> {
+                    val binReady = ttsService.piperManager.isBinaryInstalled()
+                    val map = voices.associate { voice ->
+                        voice.id to (binReady && ttsService.piperManager.isVoiceDownloaded(voice))
+                    }
+                    piperInstalled = binReady
+                    voiceReadiness = map
+                }
+                TtsEngineType.KOKORO -> {
+                    val avail = ttsService.kokoroManager.isAvailable(
+                        prefs.kokoroPythonPath,
+                        prefs.kokoroBinaryPath,
+                        prefs.kokoroVoicesPath
+                    )
+                    kokoroAvailable = avail
+                    voiceReadiness = voices.associate { it.id to avail }
+                }
+                TtsEngineType.SYSTEM -> {
+                    voiceReadiness = voices.associate { it.id to true }
+                }
+            }
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         // Engine selector row
@@ -233,21 +329,30 @@ private fun VoicesTabContent(
                 fontWeight = FontWeight.Bold
             )
             if (currentEngine == TtsEngineType.PIPER) {
+                val installed = piperInstalled
                 Text(
-                    text = if (ttsService.piperManager.isBinaryInstalled()) "Engine: Installed ✓" else "Engine: Auto-downloadable",
+                    text = when (installed) {
+                        null -> "Engine: Checking..."
+                        true -> "Engine: Installed ✓"
+                        false -> "Engine: Auto-downloadable"
+                    },
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (ttsService.piperManager.isBinaryInstalled()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (installed == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else if (currentEngine == TtsEngineType.KOKORO) {
-                val kokoroAvailable = ttsService.kokoroManager.isAvailable(
-                    prefs.kokoroPythonPath,
-                    prefs.kokoroBinaryPath,
-                    prefs.kokoroVoicesPath
-                )
+                val available = kokoroAvailable
                 Text(
-                    text = if (kokoroAvailable) "Kokoro: Ready ✓" else "Kokoro: Path configuration needed",
+                    text = when (available) {
+                        null -> "Kokoro: Checking..."
+                        true -> "Kokoro: Ready ✓"
+                        false -> "Kokoro: Path configuration needed"
+                    },
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (kokoroAvailable) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                    color = when (available) {
+                        true -> MaterialTheme.colorScheme.primary
+                        false -> MaterialTheme.colorScheme.error
+                        null -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
                 )
             }
         }
@@ -255,8 +360,6 @@ private fun VoicesTabContent(
         Spacer(Modifier.height(8.dp))
 
         // Voices list
-        val voices = remember(currentEngine) { TtsVoiceCatalog.getVoicesForEngine(currentEngine) }
-
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -271,19 +374,27 @@ private fun VoicesTabContent(
             }
 
             items(voices) { voice ->
+                val isReady = voiceReadiness[voice.id] ?: (currentEngine == TtsEngineType.SYSTEM)
                 VoiceItemCard(
                     voice = voice,
                     isSelected = voice.id == prefs.selectedVoiceId,
-                    isReady = ttsService.isVoiceReady(voice),
+                    isReady = isReady,
                     isDownloading = ttsService.isDownloading && ttsService.downloadingVoiceId == voice.id,
                     downloadProgress = ttsService.downloadProgress,
                     onSelect = { ttsService.setVoice(voice.id) },
                     onDownload = {
-                        ttsService.downloadVoiceAsync(voice)
+                        ttsService.downloadVoiceAsync(voice) {
+                            readinessRevision++
+                        }
                     },
                     onDelete = {
                         if (voice.engineType == TtsEngineType.PIPER) {
-                            ttsService.piperManager.deleteVoice(voice)
+                            tabScope.launch {
+                                withContext(Dispatchers.IO) {
+                                    ttsService.piperManager.deleteVoice(voice)
+                                }
+                                readinessRevision++
+                            }
                         }
                     },
                     onTest = {
@@ -295,14 +406,38 @@ private fun VoicesTabContent(
     }
 }
 
+private data class KokoroResolvedPathsUi(
+    val pythonPath: String,
+    val modelName: String,
+    val modelExists: Boolean,
+    val voicesName: String,
+    val voicesExist: Boolean
+)
+
 @Composable
 private fun KokoroConfigurationCard(ttsService: TtsService) {
     val prefs = ttsService.preferences
     val kokoroMgr = ttsService.kokoroManager
 
-    val resolvedPython = remember(prefs.kokoroPythonPath) { kokoroMgr.resolvePythonPath(prefs.kokoroPythonPath) }
-    val resolvedModel = remember(prefs.kokoroBinaryPath) { kokoroMgr.resolveModelFile(prefs.kokoroBinaryPath) }
-    val resolvedVoices = remember(prefs.kokoroVoicesPath) { kokoroMgr.resolveVoicesFile(prefs.kokoroVoicesPath) }
+    val resolvedPaths by produceState<KokoroResolvedPathsUi?>(
+        initialValue = null,
+        key1 = prefs.kokoroPythonPath,
+        key2 = prefs.kokoroBinaryPath,
+        key3 = prefs.kokoroVoicesPath
+    ) {
+        value = withContext(Dispatchers.IO) {
+            val py = kokoroMgr.resolvePythonPath(prefs.kokoroPythonPath)
+            val model = kokoroMgr.resolveModelFile(prefs.kokoroBinaryPath)
+            val voices = kokoroMgr.resolveVoicesFile(prefs.kokoroVoicesPath)
+            KokoroResolvedPathsUi(
+                pythonPath = py,
+                modelName = model.name,
+                modelExists = model.exists(),
+                voicesName = voices.name,
+                voicesExist = voices.exists()
+            )
+        }
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -377,7 +512,7 @@ private fun KokoroConfigurationCard(ttsService: TtsService) {
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "Using: $resolvedPython",
+                        text = "Using: ${resolvedPaths?.pythonPath ?: "Resolving..."}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
                         maxLines = 1
@@ -421,9 +556,10 @@ private fun KokoroConfigurationCard(ttsService: TtsService) {
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold
                     )
-                    val modelExists = resolvedModel.exists()
+                    val modelExists = resolvedPaths?.modelExists == true
+                    val modelLabel = resolvedPaths?.let { "${it.modelName} (${if (it.modelExists) "✓ Found" else "✗ Missing"})" } ?: "Checking..."
                     Text(
-                        text = "${resolvedModel.name} (${if (modelExists) "✓ Found" else "✗ Missing"})",
+                        text = modelLabel,
                         style = MaterialTheme.typography.labelSmall,
                         color = if (modelExists) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
                     )
@@ -469,9 +605,10 @@ private fun KokoroConfigurationCard(ttsService: TtsService) {
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold
                     )
-                    val voicesExist = resolvedVoices.exists()
+                    val voicesExist = resolvedPaths?.voicesExist == true
+                    val voicesLabel = resolvedPaths?.let { "${it.voicesName} (${if (it.voicesExist) "✓ Found" else "✗ Missing"})" } ?: "Checking..."
                     Text(
-                        text = "${resolvedVoices.name} (${if (voicesExist) "✓ Found" else "✗ Missing"})",
+                        text = voicesLabel,
                         style = MaterialTheme.typography.labelSmall,
                         color = if (voicesExist) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
                     )
@@ -626,7 +763,7 @@ private fun VoiceItemCard(
 private fun PlaybackAndCacheTabContent(
     ttsService: TtsService,
     cacheSizeBytes: Long,
-    onCacheCleared: () -> Unit
+    onClearCache: () -> Unit
 ) {
     val prefs = ttsService.preferences
 
@@ -743,12 +880,7 @@ private fun PlaybackAndCacheTabContent(
                         fontWeight = FontWeight.SemiBold
                     )
 
-                    OutlinedButton(
-                        onClick = {
-                            ttsService.clearCache()
-                            onCacheCleared()
-                        }
-                    ) {
+                    OutlinedButton(onClick = onClearCache) {
                         Text("🗑 Clear Cache", fontSize = 12.sp)
                     }
                 }

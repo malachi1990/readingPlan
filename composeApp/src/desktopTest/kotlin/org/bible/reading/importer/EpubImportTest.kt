@@ -10,6 +10,8 @@ import org.bible.reading.importer.service.ImportItemStatus
 import org.bible.reading.importer.osis.OsisConverter
 import org.bible.reading.importer.sword.SwordGenBookWriter
 import org.bible.reading.jsword.SwordManager
+import org.bible.reading.ui.parseDroppedFileUris
+import org.bible.reading.ui.parseDroppedTextPaths
 import org.crosswire.jsword.book.BookCategory
 import java.io.File
 import java.io.FileOutputStream
@@ -360,6 +362,28 @@ class EpubImportTest {
     }
 
     @Test
+    fun testOsisConverterEntityNormalizationAndEdgeCases() {
+        val rawHtml = """
+            <h2>Chapter Two &amp; Beyond</h2>
+            <p>Q&A: &ldquo;Hello&rdquo;&mdash;test&hellip; &nbsp; &#169; &#x2014; &unknownEntity; &copy; &reg; &trade;</p>
+            <p>See <a osisRef="John.3.16">John 3:16</a> and <a href="https://example.com">link text</a>.</p>
+        """.trimIndent()
+
+        val section = OsisConverter.toOsisSection(
+            ImportedChapter(id = "2_intro", title = "Chapter 2", rawContent = rawHtml, order = 2)
+        )
+
+        assertTrue(section.contains("<div type=\"section\" osisID=\"doc_2_intro\">"), section)
+        assertTrue(section.contains("<title canonical=\"true\" level=\"2\">Chapter Two &amp; Beyond</title>"), section)
+        assertTrue(section.contains("Q&amp;A:"), section)
+        assertTrue(section.contains("&#8220;Hello&#8221;&#8212;test&#8230;"), section)
+        assertTrue(section.contains("&#160; &#169; &#x2014; &amp;unknownEntity; &#169; &#174; &#8482;"), section)
+        assertTrue(section.contains("<reference osisRef=\"John.3.16\">John 3:16</reference>"), section)
+        assertTrue(section.contains("and link text."), section)
+        assertFalse(section.contains("<a "), section)
+    }
+
+    @Test
     fun testPreserveWhitespaceAndFormattingInOsisConverter() {
         // Test tabs, newlines, carriage returns, <pre>, <br with attributes>, lists, and entities
         val rawHtml = "<pre>\tdef foo():\r\n\t\treturn 42\n</pre>\n" +
@@ -700,5 +724,54 @@ class EpubImportTest {
         val finalStatus = service.queueItems.single().status
         assertTrue(finalStatus is ImportItemStatus.Success, "Retried item should succeed")
         assertEquals("Retried Queue Book", (finalStatus as ImportItemStatus.Success).book.name)
+    }
+
+    @Test
+    fun testParseDroppedFileUrisAndTextPaths() {
+        val tempDir = Files.createTempDirectory("dnd_parse_test").toFile().apply { deleteOnExit() }
+        val epubWithSpaces = File(tempDir, "My Study Book.epub").apply { writeText("dummy") }
+        val pdfFile = File(tempDir, "notes.PDF").apply { writeText("dummy") }
+        val unsupportedTxt = File(tempDir, "readme.txt").apply { writeText("ignore") }
+        val missingEpub = File(tempDir, "does_not_exist.epub")
+
+        val uriResult = parseDroppedFileUris(
+            listOf(
+                epubWithSpaces.toURI().toString(),
+                pdfFile.absolutePath,
+                unsupportedTxt.toURI().toString(),
+                missingEpub.toURI().toString(),
+                "   "
+            )
+        )
+        assertEquals(listOf(epubWithSpaces, pdfFile), uriResult.validFiles)
+        assertEquals(2, uriResult.skippedCount)
+
+        val textPayload = buildString {
+            appendLine("# Comment line in text/uri-list")
+            appendLine(epubWithSpaces.toURI().toString())
+            appendLine("")
+            appendLine(unsupportedTxt.absolutePath)
+            appendLine(pdfFile.toURI().toString())
+        }
+        val textResult = parseDroppedTextPaths(textPayload)
+        assertEquals(listOf(epubWithSpaces, pdfFile), textResult.validFiles)
+        assertEquals(1, textResult.skippedCount)
+    }
+
+    @Test
+    fun testBackgroundQueueRetainsLoadedFileAndModuleReference() = runBlocking {
+        val epub = createSyntheticEpub(title = "Persistent Reference Book", author = "Test Author")
+        val tempSwordDir = Files.createTempDirectory("sword_ref_retain_dir").toFile().apply { deleteOnExit() }
+        val manager = SwordManager(appDir = tempSwordDir)
+
+        val item = manager.enqueueBookImport(epub)
+        assertNotNull(item)
+        manager.importService.awaitIdle()
+
+        val retained = manager.importService.queueItems.single()
+        assertEquals(epub.absolutePath, retained.file.absolutePath)
+        val status = retained.status as? ImportItemStatus.Success
+        assertNotNull(status, "Loaded queue item should keep Success status with Book reference")
+        assertEquals("Persistent Reference Book", status.book.name)
     }
 }
