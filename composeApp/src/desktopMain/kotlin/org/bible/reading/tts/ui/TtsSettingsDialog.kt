@@ -2,21 +2,26 @@ package org.bible.reading.tts.ui
 
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.VerticalScrollbar
+import androidx.compose.foundation.defaultScrollbarStyle
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -28,18 +33,40 @@ import org.bible.reading.tts.TtsEngineType
 import org.bible.reading.tts.TtsService
 import org.bible.reading.tts.TtsVoice
 import org.bible.reading.tts.TtsVoiceCatalog
+import org.bible.reading.ui.theme.AppThemeMode
+import org.bible.reading.ui.theme.AppearancePreferences
+import org.bible.reading.ui.theme.AppearanceSettingsContent
+import org.bible.reading.ui.theme.CustomThemeColors
+import org.bible.reading.ui.theme.FontCatalog
 
 @Composable
 fun TtsSettingsDialog(
     ttsService: TtsService,
     player: AudioBiblePlayer,
     audioService: AudioBibleService? = null,
+    appearancePreferences: AppearancePreferences = AppearancePreferences(),
+    onThemeModeChange: ((AppThemeMode) -> Unit)? = null,
+    onFontSelectionChange: ((String) -> Unit)? = null,
+    onCustomThemeColorsChange: ((CustomThemeColors, Boolean) -> Unit)? = null,
+    onResetAppearance: (() -> Unit)? = null,
     initialTab: Int = 0,
     onDismiss: () -> Unit
 ) {
     val dialogScope = rememberCoroutineScope()
-    val maxTab = if (audioService != null) 2 else 1
-    var activeTab by remember { mutableStateOf(initialTab.coerceIn(0, maxTab)) } // 0: Voices & Engines, 1: Speech Rate & Cache, 2: Audio Bible
+    val currentOnDismiss by rememberUpdatedState(onDismiss)
+    val hasAppearanceTab = onThemeModeChange != null && onFontSelectionChange != null
+    val audioTabIndex = if (audioService != null) 1 else -1
+    val appearanceTabIndex = when {
+        !hasAppearanceTab -> -1
+        audioService != null -> 2
+        else -> 1
+    }
+    val maxTab = when {
+        hasAppearanceTab -> appearanceTabIndex
+        audioService != null -> 1
+        else -> 0
+    }
+    var activeTab by remember { mutableStateOf(initialTab.coerceIn(0, maxTab)) }
     LaunchedEffect(initialTab, maxTab) {
         activeTab = initialTab.coerceIn(0, maxTab)
     }
@@ -60,11 +87,14 @@ fun TtsSettingsDialog(
         cacheBytes = ttsService.getCacheSizeBytesAsync()
     }
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = { currentOnDismiss() },
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         Surface(
             modifier = Modifier
-                .widthIn(min = 600.dp, max = 760.dp)
-                .heightIn(min = 550.dp, max = 760.dp)
+                .widthIn(min = 660.dp, max = 780.dp)
+                .heightIn(min = 550.dp, max = 780.dp)
                 .clip(RoundedCornerShape(16.dp)),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 8.dp
@@ -84,29 +114,29 @@ fun TtsSettingsDialog(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text("🔊", fontSize = 24.sp)
+                        Text("⚙", fontSize = 24.sp)
                         Column {
                             Text(
-                                text = "Audio & Text-to-Speech Settings",
+                                text = "Settings",
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "Configure AI narration voices, playback speed, and audio Bible files",
+                                text = "Configure appearance, fonts, AI narration voices, and audio Bible files",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
 
-                    IconButton(onClick = onDismiss) {
+                    IconButton(onClick = { currentOnDismiss() }) {
                         Text("✕", fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     }
                 }
 
                 Spacer(Modifier.height(14.dp))
 
-                // Tabs: Voices & Engines / Speech Rate & Cache / Audio Bible
+                // Tabs: Text to Speech / Audio Bible / Appearance
                 TabRow(
                     selectedTabIndex = activeTab,
                     modifier = Modifier.fillMaxWidth()
@@ -114,18 +144,20 @@ fun TtsSettingsDialog(
                     Tab(
                         selected = activeTab == 0,
                         onClick = { activeTab = 0 },
-                        text = { Text("Voices & Engines", fontWeight = FontWeight.SemiBold) }
-                    )
-                    Tab(
-                        selected = activeTab == 1,
-                        onClick = { activeTab = 1 },
-                        text = { Text("Speech Rate & Cache", fontWeight = FontWeight.SemiBold) }
+                        text = { Text("Text to Speech", fontWeight = FontWeight.SemiBold, maxLines = 1) }
                     )
                     if (audioService != null) {
                         Tab(
-                            selected = activeTab == 2,
-                            onClick = { activeTab = 2 },
-                            text = { Text("Audio Bible", fontWeight = FontWeight.SemiBold) }
+                            selected = activeTab == audioTabIndex,
+                            onClick = { activeTab = audioTabIndex },
+                            text = { Text("Audio Bible", fontWeight = FontWeight.SemiBold, maxLines = 1) }
+                        )
+                    }
+                    if (hasAppearanceTab) {
+                        Tab(
+                            selected = activeTab == appearanceTabIndex,
+                            onClick = { activeTab = appearanceTabIndex },
+                            text = { Text("Appearance", fontWeight = FontWeight.SemiBold, maxLines = 1) }
                         )
                     }
                 }
@@ -133,21 +165,42 @@ fun TtsSettingsDialog(
                 Spacer(Modifier.height(14.dp))
 
                 // Tab Content
-                Box(modifier = Modifier.weight(1f)) {
+                Box(modifier = Modifier.weight(1f).clipToBounds()) {
                     when (activeTab) {
-                        0 -> VoicesTabContent(ttsService, player)
-                        1 -> PlaybackAndCacheTabContent(ttsService, cacheBytes) {
-                            dialogScope.launch {
-                                ttsService.clearCacheAsync()
-                                cacheBytes = ttsService.getCacheSizeBytesAsync()
+                        0 -> TextToSpeechTabContent(
+                            ttsService = ttsService,
+                            player = player,
+                            cacheSizeBytes = cacheBytes,
+                            onClearCache = {
+                                dialogScope.launch {
+                                    ttsService.clearCacheAsync()
+                                    cacheBytes = ttsService.getCacheSizeBytesAsync()
+                                }
                             }
-                        }
-                        else -> audioService?.let { svc ->
-                            val currentDraft = audioDraft ?: AudioBibleSettingsDraft.fromService(svc)
+                        )
+                        1 -> if (audioService != null) {
+                            val currentDraft = audioDraft ?: AudioBibleSettingsDraft.fromService(audioService)
                             AudioBibleSettingsContent(
-                                audioService = svc,
+                                audioService = audioService,
                                 draft = currentDraft,
                                 onDraftChange = { audioDraft = it }
+                            )
+                        } else if (hasAppearanceTab) {
+                            AppearanceSettingsContent(
+                                preferences = appearancePreferences,
+                                onThemeModeChange = onThemeModeChange!!,
+                                onFontSelectionChange = onFontSelectionChange!!,
+                                onCustomThemeColorsChange = onCustomThemeColorsChange ?: { _, _ -> },
+                                onResetToDefaults = { onResetAppearance?.invoke() }
+                            )
+                        }
+                        else -> if (hasAppearanceTab) {
+                            AppearanceSettingsContent(
+                                preferences = appearancePreferences,
+                                onThemeModeChange = onThemeModeChange!!,
+                                onFontSelectionChange = onFontSelectionChange!!,
+                                onCustomThemeColorsChange = onCustomThemeColorsChange ?: { _, _ -> },
+                                onResetToDefaults = { onResetAppearance?.invoke() }
                             )
                         }
                     }
@@ -191,23 +244,34 @@ fun TtsSettingsDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Active voice quick label
+                    // Active settings quick label
                     val activeVoice = ttsService.getActiveVoice()
                     val audioSummary = if (audioService != null && audioService.totalChaptersMatched > 0) {
                         " • Audio Bible: ${audioService.totalChaptersMatched} ch"
                     } else {
                         ""
                     }
+                    val appearanceSummary = if (hasAppearanceTab) {
+                        " • ${appearancePreferences.themeMode.displayName} (${FontCatalog.displayNameForSelection(appearancePreferences.fontSelection)})"
+                    } else {
+                        ""
+                    }
                     Text(
-                        text = "Active: ${activeVoice.name} (${activeVoice.engineType.displayName})$audioSummary",
+                        text = "Active: ${activeVoice.name} (${activeVoice.engineType.displayName})$audioSummary$appearanceSummary",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).padding(end = 12.dp)
                     )
 
                     Button(
                         onClick = {
-                            applyPendingAudioChanges()
-                            onDismiss()
+                            try {
+                                applyPendingAudioChanges()
+                            } finally {
+                                currentOnDismiss()
+                            }
                         }
                     ) {
                         Text("Done")
@@ -219,14 +283,17 @@ fun TtsSettingsDialog(
 }
 
 @Composable
-private fun VoicesTabContent(
+private fun TextToSpeechTabContent(
     ttsService: TtsService,
-    player: AudioBiblePlayer
+    player: AudioBiblePlayer,
+    cacheSizeBytes: Long,
+    onClearCache: () -> Unit
 ) {
     val tabScope = rememberCoroutineScope()
     val prefs = ttsService.preferences
     val currentEngine = prefs.selectedEngine
     val voices = remember(currentEngine) { TtsVoiceCatalog.getVoicesForEngine(currentEngine) }
+    val listState = rememberLazyListState()
 
     var readinessRevision by remember { mutableIntStateOf(0) }
     var piperInstalled by remember { mutableStateOf<Boolean?>(null) }
@@ -267,109 +334,111 @@ private fun VoicesTabContent(
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        // Engine selector row
-        Text(
-            text = "TTS Engine",
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Bold
-        )
-        Spacer(Modifier.height(6.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            TtsEngineType.entries.forEach { engine ->
-                val isSelected = engine == currentEngine
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                    border = if (isSelected) ButtonDefaults.outlinedButtonBorder(true) else null,
-                    modifier = Modifier
-                        .weight(1f)
-                        .clickable { ttsService.setEngine(engine) }
-                ) {
-                    Column(
-                        modifier = Modifier.padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        Text(
-                            text = engine.displayName,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = when (engine) {
-                                TtsEngineType.PIPER -> "Neural • Offline • Zero config"
-                                TtsEngineType.KOKORO -> "82M Param • Highly natural"
-                                TtsEngineType.SYSTEM -> "Built-in OS speech"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            fontSize = 10.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-        }
-
-        Spacer(Modifier.height(14.dp))
-
-        // Voice List Header
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Available Voices",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold
-            )
-            if (currentEngine == TtsEngineType.PIPER) {
-                val installed = piperInstalled
-                Text(
-                    text = when (installed) {
-                        null -> "Engine: Checking..."
-                        true -> "Engine: Installed ✓"
-                        false -> "Engine: Auto-downloadable"
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (installed == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else if (currentEngine == TtsEngineType.KOKORO) {
-                val available = kokoroAvailable
-                Text(
-                    text = when (available) {
-                        null -> "Kokoro: Checking..."
-                        true -> "Kokoro: Ready ✓"
-                        false -> "Kokoro: Path configuration needed"
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = when (available) {
-                        true -> MaterialTheme.colorScheme.primary
-                        false -> MaterialTheme.colorScheme.error
-                        null -> MaterialTheme.colorScheme.onSurfaceVariant
-                    }
-                )
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        // Voices list
+    Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .weight(1f),
+                .padding(end = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            // Engine selector row
+            item {
+                Text(
+                    text = "TTS Engine",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(6.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TtsEngineType.entries.forEach { engine ->
+                        val isSelected = engine == currentEngine
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            border = if (isSelected) ButtonDefaults.outlinedButtonBorder(true) else null,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { ttsService.setEngine(engine) }
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = engine.displayName,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = when (engine) {
+                                        TtsEngineType.PIPER -> "Neural • Offline • Zero config"
+                                        TtsEngineType.KOKORO -> "82M Param • Highly natural"
+                                        TtsEngineType.SYSTEM -> "Built-in OS speech"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+            }
+
             if (currentEngine == TtsEngineType.KOKORO) {
                 item {
                     KokoroConfigurationCard(ttsService)
-                    Spacer(Modifier.height(6.dp))
+                    Spacer(Modifier.height(4.dp))
+                }
+            }
+
+            // Voice List Header
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Available Voices",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (currentEngine == TtsEngineType.PIPER) {
+                        val installed = piperInstalled
+                        Text(
+                            text = when (installed) {
+                                null -> "Engine: Checking..."
+                                true -> "Engine: Installed ✓"
+                                false -> "Engine: Auto-downloadable"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (installed == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else if (currentEngine == TtsEngineType.KOKORO) {
+                        val available = kokoroAvailable
+                        Text(
+                            text = when (available) {
+                                null -> "Kokoro: Checking..."
+                                true -> "Kokoro: Ready ✓"
+                                false -> "Kokoro: Path configuration needed"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = when (available) {
+                                true -> MaterialTheme.colorScheme.primary
+                                false -> MaterialTheme.colorScheme.error
+                                null -> MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
                 }
             }
 
@@ -402,7 +471,38 @@ private fun VoicesTabContent(
                     }
                 )
             }
+
+            // Speech Rate & Cache Settings (below TTS engine specific settings)
+            item {
+                Spacer(Modifier.height(6.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = "Speech Rate & Cache",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(6.dp))
+                PlaybackAndCacheSettingsSection(
+                    ttsService = ttsService,
+                    cacheSizeBytes = cacheSizeBytes,
+                    onClearCache = onClearCache
+                )
+            }
         }
+
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(listState),
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .fillMaxHeight()
+                .padding(vertical = 4.dp, horizontal = 2.dp),
+            style = defaultScrollbarStyle().copy(
+                thickness = 8.dp,
+                unhoverColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+                hoverColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)
+            )
+        )
     }
 }
 
@@ -760,7 +860,7 @@ private fun VoiceItemCard(
 }
 
 @Composable
-private fun PlaybackAndCacheTabContent(
+private fun PlaybackAndCacheSettingsSection(
     ttsService: TtsService,
     cacheSizeBytes: Long,
     onClearCache: () -> Unit
@@ -768,10 +868,8 @@ private fun PlaybackAndCacheTabContent(
     val prefs = ttsService.preferences
 
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         // Speech Rate Slider
         Card(

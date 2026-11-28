@@ -18,6 +18,11 @@ import org.bible.reading.strategy.SimpleSequentialStrategy
 import org.bible.reading.strategy.Strategy
 import org.bible.reading.strategy.WeekdayOnlyStrategy
 import org.bible.reading.tts.TtsService
+import org.bible.reading.ui.theme.AppThemeMode
+import org.bible.reading.ui.theme.AppearancePreferences
+import org.bible.reading.ui.theme.AppearancePreferencesManager
+import org.bible.reading.ui.theme.CustomThemeColors
+import org.bible.reading.ui.theme.FontCatalog
 import java.io.File
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -66,8 +71,48 @@ class PlanState(planStorageDir: File? = null) {
     var audioTtsSettingsInitialTab by mutableStateOf(0)
 
     fun openAudioTtsSettingsDialog(tab: Int = 0) {
+        audioTtsSettingsInitialTab = tab.coerceIn(0, 1)
+        showTtsSettingsDialog = true
+    }
+
+    fun openSettingsDialog(tab: Int = 2) {
         audioTtsSettingsInitialTab = tab.coerceIn(0, 2)
         showTtsSettingsDialog = true
+    }
+
+    // Appearance (Theme & Font) preferences
+    private val appearancePreferencesManager = AppearancePreferencesManager(planStorageDir ?: swordManager.appDir)
+    var appearancePreferences by mutableStateOf(appearancePreferencesManager.loadPreferences())
+        private set
+
+    fun setThemeMode(mode: AppThemeMode) {
+        val updated = appearancePreferences.copy(themeMode = mode)
+        appearancePreferences = updated
+        appearancePreferencesManager.savePreferences(updated)
+    }
+
+    fun setFontSelection(fontSelection: String) {
+        val updated = appearancePreferences.copy(fontSelection = FontCatalog.normalizeSelection(fontSelection))
+        appearancePreferences = updated
+        appearancePreferencesManager.savePreferences(updated)
+    }
+
+    fun setCustomThemeColors(colors: CustomThemeColors, persist: Boolean = true) {
+        val updated = appearancePreferences.copy(customColors = colors)
+        appearancePreferences = updated
+        if (persist) {
+            appearancePreferencesManager.savePreferences(updated)
+        }
+    }
+
+    fun persistAppearancePreferences() {
+        appearancePreferencesManager.savePreferences(appearancePreferences)
+    }
+
+    fun resetAppearancePreferences() {
+        val defaults = AppearancePreferences()
+        appearancePreferences = defaults
+        appearancePreferencesManager.savePreferences(defaults)
     }
 
     // Strategy selection

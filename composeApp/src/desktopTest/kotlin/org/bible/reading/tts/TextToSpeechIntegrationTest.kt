@@ -390,12 +390,12 @@ class TextToSpeechIntegrationTest {
         assertTrue(state.showTtsSettingsDialog)
         state.showTtsSettingsDialog = false
 
-        state.openAudioTtsSettingsDialog(2)
+        state.openAudioTtsSettingsDialog(1)
         assertTrue(state.showTtsSettingsDialog)
-        assertEquals(2, state.audioTtsSettingsInitialTab)
+        assertEquals(1, state.audioTtsSettingsInitialTab)
 
         state.openAudioTtsSettingsDialog(99)
-        assertEquals(2, state.audioTtsSettingsInitialTab)
+        assertEquals(1, state.audioTtsSettingsInitialTab)
         state.openAudioTtsSettingsDialog(-5)
         assertEquals(0, state.audioTtsSettingsInitialTab)
     }

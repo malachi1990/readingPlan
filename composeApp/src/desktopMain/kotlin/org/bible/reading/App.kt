@@ -39,6 +39,7 @@ import org.bible.reading.ui.PlanState
 import org.bible.reading.ui.PlanStrategyChoice
 import org.bible.reading.ui.rememberTrackedLazyListState
 import org.bible.reading.ui.rememberTrackedScrollState
+import org.bible.reading.ui.theme.BibleReadingPlanTheme
 import java.awt.Desktop
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -48,7 +49,11 @@ import java.util.Locale
 
 @Composable
 fun App(state: PlanState = remember { PlanState() }) {
-    MaterialTheme {
+    BibleReadingPlanTheme(
+        themeMode = state.appearancePreferences.themeMode,
+        fontSelection = state.appearancePreferences.fontSelection,
+        customColors = state.appearancePreferences.customColors
+    ) {
         Surface(
             modifier = Modifier.fillMaxSize(),
             color = MaterialTheme.colorScheme.background
@@ -121,9 +126,9 @@ fun App(state: PlanState = remember { PlanState() }) {
                             }
 
                             OutlinedButton(
-                                onClick = { state.openAudioTtsSettingsDialog(0) }
+                                onClick = { state.openSettingsDialog(2) }
                             ) {
-                                Text("🔊 Audio & Voice Settings", fontWeight = FontWeight.SemiBold)
+                                Text("Settings", fontWeight = FontWeight.SemiBold)
                             }
 
                             if (state.currentTab != MainAppTab.FURTHER_STUDY) {
@@ -152,7 +157,7 @@ fun App(state: PlanState = remember { PlanState() }) {
                                     sessionState = state.sessionReadingState,
                                     onBack = { state.viewingDailyReading = null },
                                     onOpenDownload = { state.openAddBooksDialog(0) },
-                                    onOpenAudioSettings = { state.openAudioTtsSettingsDialog(2) },
+                                    onOpenAudioSettings = { state.openAudioTtsSettingsDialog(1) },
                                     onPreviousDay = if (state.hasPreviousDailyReading()) { { state.navigateDailyReading(-1) } } else null,
                                     onNextDay = if (state.hasNextDailyReading()) { { state.navigateDailyReading(1) } } else null
                                 )
@@ -202,16 +207,22 @@ fun App(state: PlanState = remember { PlanState() }) {
                 )
             }
 
-            // Unified Audio & TTS Settings modal
+            // Unified Settings modal (Audio, TTS, Appearance)
             if (state.showTtsSettingsDialog || state.showAudioSettingsDialog) {
                 TtsSettingsDialog(
                     ttsService = state.ttsService,
                     player = state.audioService.player,
                     audioService = state.audioService,
-                    initialTab = if (state.showAudioSettingsDialog) 2 else state.audioTtsSettingsInitialTab,
+                    appearancePreferences = state.appearancePreferences,
+                    onThemeModeChange = { state.setThemeMode(it) },
+                    onFontSelectionChange = { state.setFontSelection(it) },
+                    onCustomThemeColorsChange = { colors, persist -> state.setCustomThemeColors(colors, persist) },
+                    onResetAppearance = { state.resetAppearancePreferences() },
+                    initialTab = if (state.showAudioSettingsDialog) 1 else state.audioTtsSettingsInitialTab,
                     onDismiss = {
                         state.showTtsSettingsDialog = false
                         state.showAudioSettingsDialog = false
+                        state.persistAppearancePreferences()
                     }
                 )
             }
@@ -250,7 +261,7 @@ private fun BibleReadingPlanView(state: PlanState) {
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(
-                        onClick = { state.openAudioTtsSettingsDialog(2) }
+                        onClick = { state.openAudioTtsSettingsDialog(1) }
                     ) {
                         Text("🎧 Setup Audio Bible", fontWeight = FontWeight.SemiBold)
                     }

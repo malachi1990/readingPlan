@@ -50,6 +50,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.milliseconds
 
 class AudioBibleTest {
 
@@ -563,36 +564,36 @@ class AudioBibleTest {
 
     @Test
     fun testMp3AudioCodecSeeking() {
+        val tempWav = createSyntheticWav(durationSeconds = 3)
         val tempMp3 = File.createTempFile("test_sine_", ".mp3").apply { deleteOnExit() }
         try {
-            val pb = ProcessBuilder("ffmpeg", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-y", tempMp3.absolutePath)
-            val process = pb.start()
-            val exitCode = process.waitFor()
-            if (exitCode != 0 || !tempMp3.exists() || tempMp3.length() == 0L) {
-                return
-            }
+            assertTrue(TtsMp3Encoder.encodeWavToMp3(tempWav, tempMp3).isSuccess)
+            assertTrue(tempMp3.exists() && tempMp3.length() > 0L)
 
             val codec = Mp3AudioCodec()
             val session = codec.createSession(tempMp3)
-            assertTrue(session.durationMs > 0, "Duration should be estimated for MP3")
+            try {
+                assertTrue(session.durationMs > 0, "Duration should be estimated for MP3")
 
-            session.setPlaybackSpeed(1.05f)
-            session.setPlaybackSpeed(2.00f)
+                session.setPlaybackSpeed(1.05f)
+                session.setPlaybackSpeed(2.00f)
 
-            // Seek before play
-            session.seekTo(1000L)
-            assertEquals(1000L, session.currentPositionMs)
+                // Seek before play
+                session.seekTo(1000L)
+                assertEquals(1000L, session.currentPositionMs)
 
-            session.seekTo(2000L)
-            assertEquals(2000L, session.currentPositionMs)
+                session.seekTo(2000L)
+                assertEquals(2000L, session.currentPositionMs)
 
-            session.seekTo(500L)
-            assertEquals(500L, session.currentPositionMs)
-
-            session.stop()
-            session.release()
-        } catch (_: Exception) {
-            // If ffmpeg process execution fails, skip
+                session.seekTo(500L)
+                assertEquals(500L, session.currentPositionMs)
+            } finally {
+                session.stop()
+                session.release()
+            }
+        } finally {
+            tempWav.delete()
+            tempMp3.delete()
         }
     }
 
@@ -635,7 +636,7 @@ class AudioBibleTest {
             // Wait until playback has decoded past several frames
             var waited = 0
             while (player.currentPositionMs < 250L && waited < 3000) {
-                delay(50)
+                delay(50.milliseconds)
                 waited += 50
             }
             assertTrue(player.isPlaying, "Track 1 should be playing")
@@ -643,7 +644,7 @@ class AudioBibleTest {
 
             // Rewind to beginning via seekBackward
             player.seekBackward(10_000L)
-            delay(500)
+            delay(500.milliseconds)
 
             assertNull(player.errorMessage, "Unexpected playback error after rewind: ${player.errorMessage}")
             assertEquals(0, player.currentTrackIndex, "Rewinding should stay on Track 1, not skip to next track")
@@ -653,9 +654,9 @@ class AudioBibleTest {
             // Seek forward, then rewind partway back at 1.25x speed
             player.setPlaybackSpeed(1.25f)
             player.seekTo(1500L)
-            delay(300)
+            delay(300.milliseconds)
             player.seekBackward(800L)
-            delay(400)
+            delay(400.milliseconds)
 
             assertNull(player.errorMessage, "Unexpected playback error after partial rewind: ${player.errorMessage}")
             assertEquals(0, player.currentTrackIndex, "Partial rewind should stay on Track 1")
@@ -664,11 +665,11 @@ class AudioBibleTest {
 
             // Rewind while paused and then resume
             player.pause()
-            delay(150)
+            delay(150.milliseconds)
             player.seekBackward(500L)
-            delay(200)
+            delay(200.milliseconds)
             player.resume()
-            delay(300)
+            delay(300.milliseconds)
 
             assertNull(player.errorMessage, "Unexpected playback error after paused rewind: ${player.errorMessage}")
             assertEquals(0, player.currentTrackIndex, "Paused rewind should stay on Track 1")
